@@ -1,0 +1,32 @@
+RESTORE AND BACKUP GUIDE
+========================
+
+Remote repository
+  https://github.com/Baleeg-Alhilali/lua_codes
+
+Restore the current stable source
+  git clone https://github.com/Baleeg-Alhilali/lua_codes.git Model
+
+Restore the former flat layout
+  git clone --branch archive/pre-organization-2026-10-08 \
+    https://github.com/Baleeg-Alhilali/lua_codes.git Model-flat-archive
+
+Daily work
+  git switch development
+  git add -A
+  git commit -m "Describe the change"
+  git push origin development
+
+Publish validated work
+  git switch main
+  git merge --no-ff development
+  git push origin main
+
+Large generated results
+  Git does not back up ignored runs/results directories. Use a separate data
+  backup service or external storage for those artifacts.
+
+Local recovery archives created before the 2026-10-08 reorganization
+  /private/tmp/model_sources_before_organization_20261008.tar.gz
+  /private/tmp/lua_codes_git_before_promotion_20261008.tar.gz
+  /private/tmp/model_root_git_before_lua_codes_20261008.tar.gz

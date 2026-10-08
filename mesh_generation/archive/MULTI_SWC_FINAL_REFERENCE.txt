@@ -1,0 +1,45 @@
+Final Multiple SWC Files Working
+Date: 2026-07-16
+
+Lua pipeline:
+  swc_to_neurite_projector_multiple_nephrons.lua
+
+Input convention:
+  -swc1 first trace
+  -swc2 second trace
+  -swc3 third trace, and so on
+
+Per-nephron subsets:
+  Membrane_i
+  Lumen_i
+  Basolateral_i
+  Apical_i
+  Inlet_i
+  Outlet_i
+
+Shared subsets:
+  Inter
+  OuterWall
+
+Each terminal cap was validated to contain:
+  1 face
+  4 edges
+  4 vertices
+
+Defaults:
+  Lumen radius: 1
+  Diameter: 2
+  Membrane thickness: 0.2
+  Anisotropy: 6
+  Box padding: 10
+  Inter quality: 2
+  Coarse mesh only
+
+Validated with:
+  Nephron traces/3rd_trace_243.swc
+  Nephron traces/4th_trace_167.swc
+
+Validated output:
+  runs/two_nephrons_caps_complete.ugx
+
+The validated output also passed one projector-backed refinement.

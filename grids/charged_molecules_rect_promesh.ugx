@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<grid name="defGrid">
+	<vertices coords="3">0 0 0 1e-6 0 0 1e-6 1e-6 0 0 1e-6 0 5e-7 0 0 5e-7 1e-6 0</vertices>
+	<edges>0 1 1 2 2 5 5 3 3 0 0 4 4 1 4 5</edges>
+	<quadrilaterals>0 4 5 3 4 1 2 5</quadrilaterals>
+	<subset_handler name="defSH">
+		<subset name="Inner" color="0.588235 0.588235 1 1" state="393216">
+			<faces>0 1</faces>
+		</subset>
+		<subset name="LeftBnd" color="1 0 0 1" state="393216">
+			<vertices>0 3</vertices>
+			<edges>4</edges>
+		</subset>
+		<subset name="RightBnd" color="0 1 0 1" state="393216">
+			<vertices>1 2</vertices>
+			<edges>1</edges>
+		</subset>
+		<subset name="BottomBnd" color="0 0 1 1" state="393216">
+			<edges>5 6</edges>
+		</subset>
+		<subset name="TopBnd" color="1 0 1 1" state="393216">
+			<edges>2 3</edges>
+		</subset>
+	</subset_handler>
+	<subset_handler name="markSH">
+		<subset name="crease" color="1 1 1 1" state="0"/>
+		<subset name="fixed" color="1 1 1 1" state="0"/>
+	</subset_handler>
+	<selector name="defSel"/>
+</grid>

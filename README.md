@@ -1,33 +1,24 @@
-# Model Lua scripts
+# Nephron model code
 
-This directory contains the active Lua scripts that were previously stored at
-the `Model` directory root.
+This repository contains the Lua, Python, documentation, and compact input
+files used for the nephron simulations in UG4. The local repository root is:
 
-Each script resolves its location and changes the UG4 working directory back to
-the parent `Model` directory before loading inputs or writing outputs. Existing
-relative paths therefore continue to refer to folders such as:
+`/Users/alhilaba/Documents/Promesh_swc/Model`
 
-- `grids/`
-- `Nephron traces/`
-- `ProMeshFiles/`
-- `runs/` and `run/`
-- `Results/`, `results/`, and `output/`
+The repository is intentionally separated from generated meshes and numerical
+results. Large or reproducible outputs remain on the workstation under
+`runs/`, `Results/`, `results/`, and `output/`; those directories are ignored
+by Git.
 
-Scripts can be launched from the `Model` directory:
+Primary source areas:
 
-```bash
-/Users/alhilaba/UG4_promesh_ogrid/bin/ugshell -ex code/velocity_field.lua
-```
+- `code/transport/` — solute transport and electro-diffusion models.
+- `code/flow/` — Navier–Stokes, Darcy, and velocity-field models.
+- `code/coupled/` — coupled flow/transport and multicomponent models.
+- `code/archive/` — older or experimental solver variants retained for study.
+- `mesh_generation/` — active mesh-generation pipelines and helper tools.
+- `docs/` — experiment notes, handoffs, and project documentation.
+- `Nephron traces/` and `grids/` — compact source inputs.
 
-They can also be launched by absolute path from another directory:
-
-```bash
-/Users/alhilaba/UG4_promesh_ogrid/bin/ugshell \
-  -ex /Users/alhilaba/Documents/Promesh_swc/Model/code/velocity_field.lua
-```
-
-Relative command-line paths such as `-grid runs/example.ugx` are interpreted
-from the `Model` directory. Absolute command-line paths continue to work.
-
-The historical Lua copies under `ProMeshFiles/` remain in place to avoid
-overwriting active scripts with the same filenames.
+Start with `FOLDER_STRUCTURE.txt`, `BRANCHES.txt`, and
+`mesh_generation/COMMANDS.txt`.

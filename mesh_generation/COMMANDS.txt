@@ -1,0 +1,170 @@
+MESH GENERATION COMMANDS
+========================
+
+All commands below are intended to be run from:
+
+  cd /Users/alhilaba/Documents/Promesh_swc/Model/mesh_generation
+
+The scripts resolve helper files from this folder, read traces from
+../Nephron traces, and normally write generated meshes to ../runs.
+
+
+1. Standard single-nephron mesh
+--------------------------------
+
+  /Users/alhilaba/UG4_promesh_ogrid/bin/ugshell \
+    -ex swc_to_neurite_projector_nephron_final_pipeline.lua -- \
+    -swc "../Nephron traces/3rd_trace_243_third.swc" \
+    -radius 1 \
+    -membraneThickness 0.2 \
+    -numRefs 1 \
+    -out "../runs/third_trace_standard.ugx"
+
+What it does:
+  - Smooths the input SWC.
+  - Builds the Lumen and Membrane O-grid.
+  - Extends Inlet and Outlet to OuterWall.
+  - Builds graded Inter tetrahedra and the OuterWall box.
+  - Uses anisotropy 4 on straight paths and approaches anisotropy 1 at bends.
+  - Writes the coarse mesh and one globally refined inspection mesh.
+
+
+2. Large-radius and thick-membrane mesh
+----------------------------------------
+
+  /Users/alhilaba/UG4_promesh_ogrid/bin/ugshell \
+    -ex swc_to_neurite_projector_nephron_final_pipeline.lua -- \
+    -swc "../Nephron traces/3rd_trace_243_third.swc" \
+    -radius 15 \
+    -membraneThickness 10 \
+    -centerlineScale 6 \
+    -paddingX 625 \
+    -paddingY 200 \
+    -paddingZ 400 \
+    -terminalPaddingFactor 0 \
+    -numRefs 2 \
+    -out "../runs/third_trace_radius15_membrane10.ugx"
+
+What it does:
+  - Builds the validated 15 um lumen-radius and 10 um membrane case.
+  - Scales the centerline by 6 so the enlarged tube remains geometrically safe.
+  - Controls box clearance independently in X, Y, and Z.
+  - Writes the coarse mesh plus two globally conforming refinement levels.
+
+
+3. Explicit adaptive-refinement controls
+-----------------------------------------
+
+Add these options to either generation command when you want to state all
+current defaults explicitly:
+
+  -anisotropy 4 \
+  -adaptiveAnisotropy 1 \
+  -bendAnisotropy 1 \
+  -bendChordErrorFactor 0.02 \
+  -gradedInter 1 \
+  -interNearEdgeFactor 2 \
+  -interNearDistanceFactor 1.5 \
+  -interFarDistanceFactor 6 \
+  -interFarEdgeFactor 6
+
+What each option does:
+  - anisotropy: target axial elongation on nearly straight nephron paths.
+  - adaptiveAnisotropy: enables curvature-dependent axial subdivision.
+  - bendAnisotropy: target axial ratio around detected bends.
+  - bendChordErrorFactor: bend sensitivity relative to local tube radius.
+  - gradedInter: enables distance-dependent Inter tetrahedral sizing.
+  - interNearEdgeFactor: target edge scale closest to Basolateral.
+  - interNearDistanceFactor: end of the near-field distance band.
+  - interFarDistanceFactor: end of the graded transition band.
+  - interFarEdgeFactor: target edge scale at the far end of the transition.
+
+All four Inter factors multiply a measured Basolateral surface-edge scale;
+they are not fixed distances.
+
+
+4. Previous uniform behavior for comparison
+--------------------------------------------
+
+Add:
+
+  -anisotropy 1 -adaptiveAnisotropy 0 -gradedInter 0
+
+What it does:
+  - Uses uniform projector-safe anisotropy 1 along the complete nephron.
+  - Disables the additional graded Inter size field.
+  - Useful only as a regression comparison with older meshes.
+
+
+5. Multiple nephrons in one shared Inter box
+---------------------------------------------
+
+  /Users/alhilaba/UG4_promesh_ogrid/bin/ugshell \
+    -ex swc_to_neurite_projector_multiple_nephrons.lua -- \
+    -swc1 "../Nephron traces/3rd_trace_243_third.swc" \
+    -swc2 "../Nephron traces/4th_trace_third.swc" \
+    -radius 1 \
+    -membraneThickness 0.2 \
+    -numRefs 1 \
+    -out "../runs/two_nephrons_shared_inter.ugx"
+
+What it does:
+  - Smooths and combines all consecutively numbered -swc1, -swc2, ... inputs.
+  - Creates separate nephron subsets inside one conforming Inter/OuterWall box.
+  - Uses the same bend-safe anisotropy and graded Inter defaults.
+
+
+6. Refine an existing projector-backed mesh
+--------------------------------------------
+
+  /Users/alhilaba/UG4_promesh_ogrid/bin/ugshell \
+    -ex refine_neurite_projector.lua -- \
+    -grid "../runs/third_trace_standard.ugx" \
+    -refs 2 \
+    -out "../runs/third_trace_standard_refined.ugx"
+
+What it does:
+  - Loads an existing UGX containing its NeuriteProjector and npSurfParams.
+  - Applies the requested number of conforming global refinements.
+  - Preserves projector-based Apical and Basolateral geometry.
+
+
+7. Check the ProMesh GUI-style refinement path
+-----------------------------------------------
+
+  /Users/alhilaba/UG4_promesh_ogrid/bin/ugshell \
+    -ex promesh_refine_check.lua -- \
+    -grid "../runs/third_trace_standard.ugx" \
+    -out "../runs/third_trace_promesh_refine_check.ugx"
+
+What it does:
+  - Reproduces ProMesh LoadMesh, SelectAll, Refine, and SaveMesh.
+  - Confirms that serialized projector metadata works through the GUI-style path.
+
+
+8. Inspect mesh quality
+-----------------------
+
+  /Users/alhilaba/UG4_promesh_ogrid/bin/ugshell \
+    -ex Mesh_quality.lua -- \
+    -grid "../runs/third_trace_standard.ugx" \
+    -bins 20 \
+    -sliverThreshold 0.01 \
+    -anisotropyThreshold 0.1 \
+    -saveSelections
+
+What it does:
+  - Computes volume-quality and anisotropy statistics.
+  - Prints histograms with 20 bins.
+  - Optionally saves selected low-quality elements for inspection.
+
+
+Important notes
+---------------
+
+  - Length inputs are in micrometers; generated UGX coordinates are in mm.
+  - Keep crossOnly disabled for multigrid meshes. Global refinement maintains
+    conformity across Lumen, Membrane, Inter, and OuterWall.
+  - numRefs writes flat inspection meshes. The flow solver builds its multigrid
+    hierarchy in memory from the coarse projector-backed UGX.
+  - Generated files should go in ../runs, not in mesh_generation.

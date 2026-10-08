@@ -1,0 +1,21 @@
+{
+	"folders": [
+		{
+			"name": "Model",
+			"path": "../../../CODES/Model"
+		},
+		{
+			"name": "Examples",
+			"path": "../../../../UG4/ug4/apps/Examples"
+		},
+		{
+			"name": "Model",
+			"path": "."
+		},
+		{
+			"name": "UG4",
+			"path": "../../../../UG4"
+		}
+	],
+	"settings": {}
+}

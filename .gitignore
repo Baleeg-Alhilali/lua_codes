@@ -1,3 +1,26 @@
+# Generated meshes, solver results, and reports
+/run/
+/runs/
+/Results/
+/results/
+/output/
+/tmp/
+/poisson_results/
+/ProMeshFiles/
+/Finite_elements /
+
+# ParaView and other generated output formats
+*.vtu
+*.pvtu
+*.pvd
+*.avi
+*.log
+/mylogfile.txt
+
+# Python, notebooks, editors, and macOS
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
 .DS_Store
 *.swp
 *.swo

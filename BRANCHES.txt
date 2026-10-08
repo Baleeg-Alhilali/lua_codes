@@ -1,0 +1,27 @@
+LUA_CODES BRANCHES
+==================
+
+main
+----
+Purpose: stable, organized source and compact reproducibility inputs.
+Reason: users need one dependable branch for running and reviewing models.
+
+development
+-----------
+Purpose: integration branch for new models, refactors, and experiments.
+Reason: unfinished work should be committed and backed up without destabilizing
+the main branch. Changes should be validated here before merging to main.
+
+archive/pre-organization-2026-10-08
+-----------------------------------
+Purpose: exact Git recovery point for the former flat code layout before the
+Model directory became the repository root.
+Reason: preserves historical filenames and paths without cluttering main.
+
+Branch workflow
+---------------
+1. Start work from development.
+2. Commit small, descriptive changes.
+3. Validate syntax and representative runs.
+4. Merge reviewed work into main.
+5. Keep archive branches read-only.

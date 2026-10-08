@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../plugins/neuro_collection"
+		},
+		{
+			"path": "../.."
+		}
+	],
+	"settings": {}
+}

@@ -1,0 +1,38 @@
+MODEL FOLDER STRUCTURE
+======================
+
+code/transport
+  Solute transport, membrane transport, charged-species, and diffusion models.
+
+code/flow
+  Fluid-only and porous-flow models, including Navier-Stokes, Darcy, velocity
+  output, and Stokes-Darcy-BJS variants.
+
+code/coupled
+  Models combining flow, transport, membranes, or multiple physical domains.
+
+code/archive
+  Superseded baselines and explicitly experimental solver variants. These are
+  retained for comparison and should not be selected as current production
+  models without revalidation.
+
+mesh_generation
+  Current SWC-to-UGX pipelines, refinement checks, mesh-quality inspection,
+  Python preprocessing helpers, commands, and an archive of earlier variants.
+
+docs
+  Scientific notes, handoff documents, and implementation rationale.
+
+Nephron traces
+  Compact SWC morphology inputs.
+
+grids
+  Compact reusable UG4 input grids. Large generated meshes belong in runs/.
+
+runs, run, Results, results, output, tmp
+  Generated or temporary artifacts. These remain local and are ignored by Git.
+
+Repository boundary
+-------------------
+The Model directory is the lua_codes Git repository root. The code directory
+is a normal source folder and no longer contains a nested .git directory.
