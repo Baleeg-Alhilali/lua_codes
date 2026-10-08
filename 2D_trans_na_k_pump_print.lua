@@ -7,7 +7,8 @@ end
 local MODEL_ROOT = assert(__model_script:match("^(.*)/code/[^/]+$"),
     "Expected this script inside Model/code: " .. __model_script)
 ChangeDirectory(MODEL_ROOT)
-
+-- test for the github
+-- test
 -- Na+/K+-ATPase variant of the 2D membrane-transport model.
 -- The shared implementation switches to Na/K fields and the compiled NaKPump
 -- transporter when this flag is set before loading it.
