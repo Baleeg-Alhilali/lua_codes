@@ -11,9 +11,12 @@ ChangeDirectory(MODEL_ROOT)
 ug_load_script("ug_util.lua")
 ug_load_script("util/load_balancing_util.lua")
 
--- Standalone Robin-reduced Stokes--Darcy--BJS model with all-iterative
--- BiCGStab/GMG subsolvers. No other application script is loaded by this file.
-AssertPluginsLoaded({"NavierStokes", "ConvectionDiffusion"})
+-- Monolithic Stokes--Darcy--BJS model with separate Stokes and Darcy pressure
+-- unknowns. The Darcy unknown is algebraically scaled, while all reported
+-- pressures and velocities retain their physical kinematic units.
+AssertPluginsLoaded({
+    "NavierStokes", "ConvectionDiffusion", "neuro_collection", "SuperLU6"
+})
 
 total_start_time = GetClockS()
 
@@ -24,64 +27,53 @@ total_start_time = GetClockS()
 dim = 3
 
 -- These are the only command-line parameters accepted by this script.
-numRefs = util.GetParamNumber("-numRefs", 2, "number of uniform refinements")
+numRefs = util.GetParamNumber("-numRefs", 0, "number of uniform refinements")
 bstokes = util.GetParamBool("-bstokes", true,
     "true: Stokes flow; false: Navier--Stokes flow")
 vmax = util.GetParamNumber("-vmax", 3.0, "maximum inlet velocity [mm/s]")
 
 -- Geometry and physical parameters: edit values here, not on the command line.
-gridS = ""
+gridS = "stright_tube"
 gridName = "runs/" .. gridS .. ".ugx"
 numPreRefs = 0
-inletRadius = 1.0                 -- [mm]
-tubeLength = 20.0                 -- [mm]
+-- Physical lumen radius.  The ring at r = 5e-3 mm is the inner O-grid
+-- transition, not the wall; the lumen/TripleJunction rim is at r = 1e-2 mm.
+inletRadius = 1.0e-2               -- [mm]
+inletCenterX = 2.286625           -- [mm]
+inletCenterY = 3.331125           -- [mm]
 viscosity = 1.0                   -- kinematic viscosity [mm^2/s]
-permeabilityM2 = 1.0e-12          -- Darcy permeability [m^2]
+membranePermeabilityM2 = 1.0e-15  -- membrane Darcy permeability [m^2]
+interPermeabilityM2 = 1.0e-14     -- interstitial Darcy permeability [m^2]
+bjsInterfacePermeabilityM2 = 1.0e-12 -- effective BJS slip permeability [m^2]
 bjsAlpha = 0.2                    -- dimensionless BJS coefficient
 density = 1000.0                  -- [kg/m^3]
-outerPressurePa = 0.0             -- pressure at OuterWall [Pa]
-
--- Solver parameters: edit values here, not on the command line.
-linearTolerance = 1.0e-10
-linearReduction = 1.0e-8
-linearMaxIters = 1000
-newtonTolerance = 1.0e-10
-newtonReduction = 1.0e-8
-newtonMaxIters = 30
-coarseTolerance = 1.0e-12
-coarseReduction = 1.0e-10
-coarseMaxIters = 500
-ilutThreshold = 1.0e-8
-gmgBaseLevel = 0
-gmgCycle = "V"
-gmgPreSmooth = 4
-gmgPostSmooth = 4
-gmgUseRAP = false
-
--- Porous-layer impedance parameter.
-porousResistanceLength = 4.0   -- [mm], Robin estimate OuterWall-radius
+outerPressurePa = 0.0             -- [Pa], no imposed interstitial back-pressure
+darcyPressureScale = 1.0e4        -- p_D(physical) = scale * p_D(unknown)
+normalResistanceLength = 1.0e-2   -- [mm], effective membrane resistance length
+solverSetup = "gmg"
+gmgUseRAP = true                  -- preserve coupled interface blocks on coarse levels
+interfaceFluxSign = 1.0
+interfaceTractionSign = 1.0
+maxKrylovCycles = 8
+gmgBaseLevel = 0                  -- retain the loaded coarse mesh as the GMG base
 
 -- MPI runs create .pvtu master files and one .vtu file per rank.
 local flowModelTag = bstokes and "stokes" or "navier_stokes"
-vtk_file_name = "Results/" .. gridS .. "_" .. flowModelTag
-    .. "_darcy_bjs_robin_gmg_ref" .. numRefs
+vtk_file_name = "Results_final/" .. gridS .. "_" .. flowModelTag
+    .. "_darcy_bjs_two_pressure_scaled_" .. solverSetup .. "_ref" .. numRefs
 
 assert(numRefs >= 0, "numRefs must be non-negative")
 assert(vmax >= 0.0, "vmax must be non-negative")
-assert(permeabilityM2 > 0.0, "permeabilityM2 must be positive")
+assert(membranePermeabilityM2 > 0.0,
+    "membranePermeabilityM2 must be positive")
+assert(interPermeabilityM2 > 0.0,
+    "interPermeabilityM2 must be positive")
+assert(bjsInterfacePermeabilityM2 > 0.0,
+    "bjsInterfacePermeabilityM2 must be positive")
 assert(bjsAlpha > 0.0, "bjsAlpha must be positive")
 assert(density > 0.0, "density must be positive")
-assert(linearTolerance > 0.0 and linearReduction > 0.0,
-    "linear convergence tolerances must be positive")
-assert(linearMaxIters > 0 and coarseMaxIters > 0,
-    "solver iteration limits must be positive")
-assert(porousResistanceLength > 0.0,
-    "porousResistanceLength must be positive")
-
--- Distribute the serialized-projector base grid before refinement.  Delaying
--- distribution until numRefs duplicates the refined grid as ghosts and makes
--- refinement 3 appear stuck during assembly.
-balancer.firstDistLvl = 0
+assert(normalResistanceLength > 0.0,
+    "normalResistanceLength must be positive")
 
 InitUG(dim, AlgebraType("CPU", 1))
 print("MPI processes: " .. NumProcs())
@@ -108,81 +100,97 @@ end
 
 assert(file_contains(gridName, '<projection_handler'),
     "The selected UGX has no serialized ProjectionHandler: " .. gridName)
-assert(file_contains(gridName, '<projector type="cylinder"'),
-    "The long-tube grid has no serialized CylinderProjector: " .. gridName)
+assert(file_contains(gridName, '<projector type="neurite"'),
+    "The straight-tube grid has no serialized NeuriteProjector: " .. gridName)
+assert(file_contains(gridName, '<vertex_attachment name="npSurfParams"'),
+    "The straight-tube grid has no npSurfParams refinement data: " .. gridName)
 
-print("Cylinder-projector grid: " .. gridName)
+print("Neurite-projector straight-tube grid: " .. gridName)
+
+-- Loading once registers the custom npSurfParams attachment. Loading the
+-- actual domain afterwards restores those values and the neurite projector.
+local registrationDomain = Domain()
+registrationDomain:create_additional_subset_handler("projSH")
+LoadDomain(registrationDomain, gridName)
+registrationDomain = nil
+collectgarbage("collect")
 
 dom = Domain()
 dom:create_additional_subset_handler("projSH")
 LoadDomain(dom, gridName)
 assert(util.CheckSubsets(dom,
-    {"Lumen", "Inter", "Apical", "OuterWall", "Inlet", "Outlet",
-     "TripleJunction"}),
+    {"Lumen", "Membrane", "Inter", "Apical", "Basolateral",
+     "OuterWall", "MembraneWall", "Inlet", "Outlet", "TripleJunction"}),
     "The domain is missing a required Stokes--Darcy subset")
 
--- Repair open-axis vertices mislabeled Inter although they border Lumen.
-local lumenSubset = dom:subset_handler():get_subset_index("Lumen")
-local axisTolerance = 1.0e-10
-local capTolerance = 1.0e-10
-local function repair_lumen_axis_vertices()
-    AssignSubset_VerticesInCube(
-        dom,
-        Vec3d(-axisTolerance, -axisTolerance, capTolerance),
-        Vec3d( axisTolerance,  axisTolerance, tubeLength - capTolerance),
-        lumenSubset
-    )
+if NumProcs() > 1 then
+    -- Build the complete projector-backed GMG hierarchy before its first MPI
+    -- distribution. This keeps the base operator agglomeratable as one system.
+    balancer.firstDistLvl = numRefs
+    balancer.ParseParameters()
+    print("First distribution level: " .. balancer.firstDistLvl)
 end
-
-repair_lumen_axis_vertices()
 balancer.RefineAndRebalanceDomain(dom, numRefs - numPreRefs)
-repair_lumen_axis_vertices()
 
 print("Domain info:")
 print(dom:domain_info():to_string())
 
 --------------------------------------------------------------------------------
--- Separate approximation spaces for a stable partitioned interface solve
+-- One approximation space with separate pressure traces
 --------------------------------------------------------------------------------
 
-stokesSpace = ApproximationSpace(dom)
-stokesSpace:add_fct(
-    {"u", "v", "w", "pressure"}, "Lagrange", 1,
-    {"Lumen", "Inlet", "Outlet", "Apical", "TripleJunction"}
+approxSpace = ApproximationSpace(dom)
+local allFlowSubsets =
+    "Lumen,Membrane,Inter,Apical,Basolateral,OuterWall,MembraneWall,Inlet,Outlet,TripleJunction"
+local stokesAndInterfaceSubsetNames = {
+    "Lumen", "Membrane", "Apical", "Basolateral", "MembraneWall",
+    "Inlet", "Outlet", "TripleJunction"
+}
+approxSpace:add_fct(
+    {"u", "v", "w", "p_stokes"}, "Lagrange", 1,
+    stokesAndInterfaceSubsetNames
 )
-stokesSpace:init_levels()
-stokesSpace:init_top_surface()
-
-darcySpace = ApproximationSpace(dom)
-darcySpace:add_fct(
-    "darcyPressure", "Lagrange", 1,
-    "Inter,Apical,OuterWall,Inlet,Outlet,TripleJunction"
+approxSpace:add_fct(
+    "p_darcy_scaled", "Lagrange", 1, allFlowSubsets
 )
-darcySpace:init_levels()
-darcySpace:init_top_surface()
+approxSpace:init_levels()
+approxSpace:init_top_surface()
 
-print("Stokes approximation space:")
-stokesSpace:print_statistic()
-print("Darcy approximation space:")
-darcySpace:print_statistic()
+print("Monolithic Stokes--Darcy approximation space:")
+approxSpace:print_statistic()
 
 --------------------------------------------------------------------------------
 -- Physical coefficients and boundary data
 --------------------------------------------------------------------------------
 
-local permeability = permeabilityM2 * 1.0e6 -- [mm^2]
-local darcyMobility = permeability / viscosity
-local bjsFriction = bjsAlpha * viscosity / math.sqrt(permeability)
-local outerPressure = outerPressurePa / (density * 1.0e-6)
-local normalRobinResistance = porousResistanceLength / darcyMobility
+local membranePermeability = membranePermeabilityM2 * 1.0e6 -- [mm^2]
+local interPermeability = interPermeabilityM2 * 1.0e6       -- [mm^2]
+local bjsInterfacePermeability = bjsInterfacePermeabilityM2 * 1.0e6
+local membraneDarcyMobility = membranePermeability / viscosity
+local interDarcyMobility = interPermeability / viscosity
+local scaledMembraneDarcyMobility =
+    membraneDarcyMobility * darcyPressureScale
+local scaledInterDarcyMobility = interDarcyMobility * darcyPressureScale
+local bjsFriction =
+    bjsAlpha * viscosity / math.sqrt(bjsInterfacePermeability)
+local normalDarcyResistance =
+    normalResistanceLength / membraneDarcyMobility
+local outerPressurePhysical = outerPressurePa / (density * 1.0e-6)
+local outerPressureScaled = outerPressurePhysical / darcyPressureScale
 
 print(string.format(
-    "K=%.6e mm^2, K/nu=%.6e s, BJS friction=%.6e mm/s, Robin=%.6e mm/s",
-    permeability, darcyMobility, bjsFriction, normalRobinResistance
+    "K_mem=%.6e mm^2, K_inter=%.6e mm^2, pressure scale=%.6e",
+    membranePermeability, interPermeability, darcyPressureScale
+))
+print(string.format(
+    "Scaled Darcy diffusion: membrane=%.6e, inter=%.6e; BJS friction=%.6e; normal resistance=%.6e; OuterWall pressure=%.6e Pa",
+    scaledMembraneDarcyMobility, scaledInterDarcyMobility,
+    bjsFriction, normalDarcyResistance, outerPressurePa
 ))
 
 function inletVelocity(x, y, z, t)
-    local radiusSquared = x * x + y * y
+    local dx, dy = x - inletCenterX, y - inletCenterY
+    local radiusSquared = dx * dx + dy * dy
     local profile = math.max(
         0.0, 1.0 - radiusSquared / (inletRadius * inletRadius)
     )
@@ -192,53 +200,10 @@ function inletVelocity(x, y, z, t)
     return 0.0, 0.0, vmax * profile
 end
 
-local function radialNormal(x, y)
-    local radius = math.sqrt(x * x + y * y)
-    if radius < 1.0e-12 then return 1.0, 0.0 end
-    return x / radius, y / radius
-end
-
-function lumenNormalX(x, y, z, t, si)
-    local nx = radialNormal(x, y)
-    return nx
-end
-function lumenNormalY(x, y, z, t, si)
-    local _, ny = radialNormal(x, y)
-    return ny
-end
-function lumenNormalZ(x, y, z, t, si)
-    return 0.0
-end
-function darcyNormalX(x, y, z, t, si)
-    return -lumenNormalX(x, y, z, t, si)
-end
-function darcyNormalY(x, y, z, t, si)
-    return -lumenNormalY(x, y, z, t, si)
-end
-function darcyNormalZ(x, y, z, t, si)
-    return 0.0
-end
-
---------------------------------------------------------------------------------
--- One-way interface data: Stokes normal velocity drives Darcy flux.
---------------------------------------------------------------------------------
-
-stokesState = GridFunction(stokesSpace)
-darcyState = GridFunction(darcySpace)
-stokesState:set(0.0)
-darcyState:set(0.0)
-
-local transferredDarcyFlux = 0.0
-
-function laggedStokesNormalFlux(x, y, z, t, si)
-    return transferredDarcyFlux
-end
-
---------------------------------------------------------------------------------
 -- Stokes/Navier--Stokes problem in Lumen
 --------------------------------------------------------------------------------
 
-stokesEq = NavierStokesFV1({"u", "v", "w", "pressure"}, {"Lumen"})
+stokesEq = NavierStokesFV1({"u", "v", "w", "p_stokes"}, {"Lumen"})
 stokesEq:set_stokes(bstokes)
 stokesEq:set_laplace(false) -- symmetric-gradient stress required for BJS
 stokesEq:set_kinematic_viscosity(viscosity)
@@ -251,6 +216,10 @@ stokesEq:set_pac_upwind(false)
 stokesInlet = NavierStokesInflow(stokesEq)
 stokesInlet:add("inletVelocity", "Inlet")
 stokesOpenBoundary = NavierStokesNoNormalStressOutflow(stokesEq)
+-- This boundary discretization is also required on Apical: besides its
+-- traction terms, it closes the Stokes continuity control volumes with the
+-- actual boundary-normal velocity.  WSBC alone supplies only the tangential
+-- BJS term and does not assemble that mass flux.
 stokesOpenBoundary:add("Outlet,Apical")
 stokesRim = NavierStokesWall(stokesEq)
 stokesRim:add("TripleJunction")
@@ -260,86 +229,130 @@ stokesBJS = NavierStokesWSBCFV1(stokesEq)
 stokesBJS:add("Apical")
 stokesBJS:set_sliding_factor(bjsFriction)
 stokesBJS:set_sliding_limit(0.0)
-stokesBJS:set_normal_factor(normalRobinResistance)
-
--- Reduced porous-layer condition in the interface-normal direction:
---     (sigma_S n).n + R_D u_n = 0,
--- where R_D = L_D/(K/nu).  The WSBC operator assembles this term into both
--- defect and Jacobian, unlike a prescribed Neumann callback.
-
---------------------------------------------------------------------------------
--- Apply the normal Darcy impedance implicitly; BJS handles tangential slip.
-stokesDisc = DomainDiscretization(stokesSpace)
-stokesDisc:add(stokesEq)
-stokesDisc:add(stokesInlet)
-stokesDisc:add(stokesOpenBoundary)
-stokesDisc:add(stokesRim)
-stokesDisc:add(stokesBJS)
+-- Implicit membrane-normal impedance R_n = delta*nu/K.  The resolved Darcy
+-- coupling alone admits vertex-scale normal interface modes on this matching
+-- FV1 trace; this positive Robin term supplies the physical membrane
+-- resistance and removes those nonphysical leakage jets.
+stokesBJS:set_normal_factor(normalDarcyResistance)
 
 --------------------------------------------------------------------------------
--- Darcy reconstruction driven by the stabilized Stokes normal flux.
+-- Darcy equation through Membrane and Inter with a scaled pressure unknown
 --------------------------------------------------------------------------------
 
-darcyEq = ConvectionDiffusionFV1("darcyPressure", "Inter")
-darcyEq:set_mass_scale(0.0)
-darcyEq:set_diffusion(darcyMobility)
+darcyMembraneEq = ConvectionDiffusionFV1("p_darcy_scaled", "Membrane")
+darcyMembraneEq:set_mass_scale(0.0)
+darcyMembraneEq:set_diffusion(scaledMembraneDarcyMobility)
 
-darcyInterfaceFlux = NeumannBoundary("darcyPressure", "fv1")
-darcyInterfaceFlux:add("laggedStokesNormalFlux", "Apical", "Inter")
+darcyInterEq = ConvectionDiffusionFV1("p_darcy_scaled", "Inter")
+darcyInterEq:set_mass_scale(0.0)
+darcyInterEq:set_diffusion(scaledInterDarcyMobility)
+
 darcyOuterPressure = DirichletBoundary()
-darcyOuterPressure:add(outerPressure, "darcyPressure", "OuterWall")
+darcyOuterPressure:add(
+    outerPressureScaled, "p_darcy_scaled", "OuterWall"
+)
 
-darcyDisc = DomainDiscretization(darcySpace)
-darcyDisc:add(darcyEq)
-darcyDisc:add(darcyInterfaceFlux)
-darcyDisc:add(darcyOuterPressure)
+coupledDisc = DomainDiscretization(approxSpace)
+coupledDisc:add(stokesEq)
+coupledDisc:add(stokesInlet)
+coupledDisc:add(stokesOpenBoundary)
+coupledDisc:add(stokesRim)
+coupledDisc:add(stokesBJS)
+
+-- Laptev (2003), eq. (1.152), and Jaeger--Mikelic--Neuss give the Darcy
+-- pressure as the free-fluid normal stress (plus a microstructure-dependent
+-- boundary-layer shear correction).  For a symmetric, isotropic interface
+-- that correction is zero.  Thus sigma_S n_S = -p_D n_S; this is not literal
+-- equality of the two pressure unknowns.  NeumannBoundary takes the outward
+-- conservative momentum flux -sigma_S n_S = p_D n_S.
+local darcyPhysicalPressureValue =
+    darcyPressureScale * darcyMembraneEq:value()
+for _, row in ipairs({
+    {"u", util.CreateConstUserVector3d(1.0, 0.0, 0.0)},
+    {"v", util.CreateConstUserVector3d(0.0, 1.0, 0.0)},
+    {"w", util.CreateConstUserVector3d(0.0, 0.0, 1.0)}
+}) do
+    local interfaceTraction = NeumannBoundary(row[1], "fv1")
+    interfaceTraction:add(
+        interfaceTractionSign * darcyPhysicalPressureValue * row[2],
+        "Apical", "Lumen"
+    )
+    coupledDisc:add(interfaceTraction)
+end
+
+-- Normal-velocity continuity: the Stokes normal velocity is the prescribed
+-- outward Darcy flux on the Membrane side of Apical. These exported data keep
+-- their Jacobian derivatives, so this remains a monolithic coupling.
+local stokesVelocity = stokesEq:velocity()
+darcyInterfaceFlux = NeumannBoundary("p_darcy_scaled", "fv1")
+darcyInterfaceFlux:add(
+    interfaceFluxSign * stokesVelocity, "Apical", "Membrane"
+)
+
+-- Coupled user data must see both fields on the elements adjacent to Apical.
+-- Pin only their non-physical extensions; never pin the Apical trace itself.
+inactiveDarcy = DirichletBoundary()
+inactiveDarcy:add(
+    0.0, "p_darcy_scaled", "Lumen,Inlet,Outlet"
+)
+inactiveStokes = DirichletBoundary()
+for _, fct in ipairs({"u", "v", "w", "p_stokes"}) do
+    inactiveStokes:add(
+        0.0, fct, "Membrane,Basolateral,MembraneWall"
+    )
+end
+
+coupledDisc:add(darcyMembraneEq)
+coupledDisc:add(darcyInterEq)
+coupledDisc:add(darcyInterfaceFlux)
+coupledDisc:add(darcyOuterPressure)
+coupledDisc:add(inactiveDarcy)
+coupledDisc:add(inactiveStokes)
 --------------------------------------------------------------------------------
--- Sequential BiCGStab/GMG solves
+-- One monolithic iterative solve
 --------------------------------------------------------------------------------
 
 local solve_start_time = GetClockS()
 local function outerLinearSolverDescription(space, disc)
-    -- The level-0 matrix is distributed as well.  Merely asking GMG to
-    -- "gather if ambiguous" left BiCGStab working on an incomplete parallel
-    -- coarse problem and it stagnated at numRefs=2.  Build the coarse inverse
-    -- explicitly on the agglomerated matrix.  Its actual solve remains fully
-    -- iterative (BiCGStab/ILUT); no LU factorization is used.
-    local iterativeCoarseSolver = util.solver.CreateLinearSolver({
-        type = "bicgstab",
-        precond = {
-            type = "ilut",
-            threshold = ilutThreshold,
-            ordering = "NativeCuthillMcKee"
-        },
-        convCheck = {
-            type = "standard",
-            iterations = coarseMaxIters,
-            absolute = coarseTolerance,
-            reduction = coarseReduction,
-            verbose = true
-        }
-    })
-    local agglomeratedIterativeCoarseSolver =
-        AgglomeratingSolver(iterativeCoarseSolver)
+    assert(solverSetup == "gmg", "Unknown solverSetup: " .. solverSetup)
+
+    -- Only p_stokes is a saddle-point multiplier.  Keep the elliptic Darcy
+    -- pressure in the main A block with velocity so its interface coupling is
+    -- retained; putting both pressures in the Schur block destroys this.
+    local gmgMainInverse = ILU()
+    gmgMainInverse:set_damp(0.8)
+    gmgMainInverse:set_inversion_eps(1.0e-30)
+    local gmgStokesPressureInverse = ILU()
+    gmgStokesPressureInverse:set_damp(0.8)
+    gmgStokesPressureInverse:set_inversion_eps(1.0e-30)
+    local gmgSmoother = UzawaBase({"p_stokes"})
+    gmgSmoother:set_forward_iter(gmgMainInverse)
+    gmgSmoother:set_schur_iter(gmgStokesPressureInverse)
+    gmgSmoother:set_backward_iter(gmgMainInverse)
+
+    local gmgSchurMassEq = ConvectionDiffusionFV1("p_stokes", "Lumen")
+    gmgSchurMassEq:set_mass_scale(1.0)
+    gmgSchurMassEq:set_diffusion(0.0)
+    local gmgSchurMassDisc = DomainDiscretization(space)
+    gmgSchurMassDisc:add(gmgSchurMassEq)
+    local gmgSchurMassOp = AssembledLinearOperator(gmgSchurMassDisc)
+    gmgSmoother:set_schur_operator_update(gmgSchurMassOp, 1.0 / viscosity)
 
     return {
         type = "bicgstab",
         precond = {
-            type = "gmg",
+            type = "gmg", -- alternative: "ilu" for a single-level solve
             approxSpace = space,
             discretization = disc,
             baseLevel = gmgBaseLevel,
-            baseSolver = agglomeratedIterativeCoarseSolver,
-            smoother = {
-                type = "ilu",
-                damping = 0.7,
-                overlap = true,
-                consistentInterfaces = true,
-                inversionEps = 1.0e-12
-            },
-            cycle = gmgCycle,
-            preSmooth = gmgPreSmooth,
-            postSmooth = gmgPostSmooth,
+            -- The outer/full-grid solve is iterative. SuperLU is restricted
+            -- to the small level-0 saddle-point problem, where pivoting is
+            -- needed for a reliable GMG coarse correction.
+            baseSolver = "superlu",
+            smoother = gmgSmoother,
+            cycle = "V",
+            preSmooth = 2,
+            postSmooth = 2,
             rap = gmgUseRAP,
             gatheredBaseSolverIfAmbiguous = true,
             transfer = {
@@ -351,9 +364,9 @@ local function outerLinearSolverDescription(space, disc)
         },
         convCheck = {
             type = "standard",
-            iterations = linearMaxIters,
-            absolute = linearTolerance,
-            reduction = linearReduction,
+            iterations = 400,
+            absolute = 1e-14,
+            reduction = 1.0e-4,
             verbose = true
         }
     }
@@ -367,60 +380,161 @@ local function solveLinearSubproblem(space, disc, label)
     solution:set(0.0)
     disc:adjust_solution(solution)
     disc:assemble_linear(matrix, rhs)
-    local solver = util.solver.CreateLinearSolver(
-        outerLinearSolverDescription(space, disc)
-    )
-    print("=== " .. label .. " OUTER BiCGStab/GMG convergence ===")
+    local componentNames = {
+        "u", "v", "w", "p_stokes", "p_darcy_scaled"
+    }
+    local function trueComponentDefects()
+        solution:set_consistent_storage_type()
+        local defect = rhs:clone()
+        VecAssign(defect, rhs)
+        matrix:apply_sub(defect, solution)
+        local norms = {}
+        for selected = 1, #componentNames do
+            local factors = {0.0, 0.0, 0.0, 0.0, 0.0}
+            factors[selected] = 1.0
+            local componentDefect = defect:clone()
+            ScaleGF(componentDefect, defect, factors)
+            norms[selected] = VecNorm(componentDefect)
+        end
+        return norms
+    end
+    local initialDefects = trueComponentDefects()
+    local solverDesc = outerLinearSolverDescription(space, disc)
+    local solver = util.solver.CreateLinearSolver(solverDesc)
+    print("=== " .. label .. " OUTER BiCGStab/"
+        .. solverSetup .. " convergence ===")
     solver:init(matrix, solution)
-    assert(solver:apply(solution, rhs), label .. " BiCGStab--GMG failed")
+    local converged = false
+    local solveCycles = maxKrylovCycles
+    for restart = 1, solveCycles do
+        print(string.format(
+            "=== Solver cycle %d/%d ===", restart, solveCycles
+        ))
+        solver:apply(solution, rhs)
+        local currentDefects = trueComponentDefects()
+        converged = true
+        for component = 1, #componentNames do
+            local relative = currentDefects[component]
+                / math.max(initialDefects[component], 1.0e-300)
+            print(string.format(
+                "TRUE DEFECT %-8s abs=%.6e relative-to-original=%.6e",
+                componentNames[component], currentDefects[component], relative
+            ))
+            local verifiedReduction = 1.0e-8
+            local verifiedAbsolute = 1.0e-12
+            local target = math.max(
+                verifiedAbsolute,
+                initialDefects[component] * verifiedReduction
+            )
+            if currentDefects[component] ~= currentDefects[component]
+                or currentDefects[component] > target then
+                converged = false
+            end
+        end
+        if converged then break end
+    end
+    assert(converged, label .. " restarted iterative/" .. solverSetup
+        .. " failed the verified component tolerances")
     print("=== " .. label .. " OUTER solve converged ===")
     solution:set_consistent_storage_type()
     return solution
 end
 
-for _, state in ipairs({stokesState, darcyState}) do
-    state:set_consistent_storage_type()
-end
-
-local solvedStokes = solveLinearSubproblem(stokesSpace, stokesDisc, "Stokes")
-VecScaleAdd2(stokesState, 1.0, solvedStokes, 0.0, stokesState)
-stokesState:set_consistent_storage_type()
-
--- Conservative MPI-safe transfer. The integral is globally reduced over all
--- ranks, and its mean is imposed around the complete cylindrical interface.
-local stokesVelocityData = GridFunctionVectorData(stokesState, "u,v,w")
-local totalStokesOutflow = IntegralNormalComponentOnManifold(
-    stokesVelocityData, stokesState, "Apical", "Lumen", 0.0
+coupledState = solveLinearSubproblem(
+    approxSpace, coupledDisc, "Monolithic Stokes--Darcy"
 )
-local apicalArea = 2.0 * math.pi * inletRadius * tubeLength
-transferredDarcyFlux = -totalStokesOutflow / apicalArea
-print(string.format(
-    "Interface flux transfer: total=%.6e mm^3/s, mean Darcy-normal=%.6e mm/s",
-    totalStokesOutflow, transferredDarcyFlux
-))
+coupledState:set_consistent_storage_type()
 
-local solvedDarcy = solveLinearSubproblem(darcySpace, darcyDisc, "Darcy")
-VecScaleAdd2(darcyState, 1.0, solvedDarcy, 0.0, darcyState)
-darcyState:set_consistent_storage_type()
+-- Convert only the stored Darcy unknown back to physical pressure. Using this
+-- state for postprocessing also makes darcyEq:gradient() a physical gradient.
+physicalState = coupledState:clone()
+ScaleGF(physicalState, coupledState, {
+    1.0, 1.0, 1.0, 1.0, darcyPressureScale
+})
+physicalState:set_consistent_storage_type()
 
 --------------------------------------------------------------------------------
 -- Darcy velocity and VTK output
 --------------------------------------------------------------------------------
 
-darcyVelocity = DarcyVelocityLinker()
-darcyVelocity:set_permeability(permeability)
-darcyVelocity:set_viscosity(viscosity)
-darcyVelocity:set_density(1.0)
-darcyVelocity:set_gravity(ConstUserVector(0.0))
-darcyVelocity:set_pressure_gradient(darcyEq:gradient())
+darcyMembraneVelocity = DarcyVelocityLinker()
+darcyMembraneVelocity:set_permeability(membranePermeability)
+darcyMembraneVelocity:set_viscosity(viscosity)
+darcyMembraneVelocity:set_density(1.0)
+darcyMembraneVelocity:set_gravity(ConstUserVector(0.0))
+darcyMembraneVelocity:set_pressure_gradient(darcyMembraneEq:gradient())
 
-local darcyVelocityComponents = {}
-for component = 0, 2 do
-    darcyVelocityComponents[component + 1] = UserVectorEntryAdapter3d()
-    darcyVelocityComponents[component + 1]:set_vector(
-        darcyVelocity, component
-    )
+darcyInterVelocity = DarcyVelocityLinker()
+darcyInterVelocity:set_permeability(interPermeability)
+darcyInterVelocity:set_viscosity(viscosity)
+darcyInterVelocity:set_density(1.0)
+darcyInterVelocity:set_gravity(ConstUserVector(0.0))
+darcyInterVelocity:set_pressure_gradient(darcyInterEq:gradient())
+
+local pressureTraceJumpL2 = L2Error(
+    physicalState, "p_stokes", physicalState, "p_darcy_scaled", 2,
+    "Apical"
+)
+local stokesInletFlow = IntegralNormalComponentOnManifold(
+    stokesVelocity, physicalState, "Inlet", "Lumen"
+)
+local stokesOutletFlow = IntegralNormalComponentOnManifold(
+    stokesVelocity, physicalState, "Outlet", "Lumen"
+)
+local stokesApicalFlow = IntegralNormalComponentOnManifold(
+    stokesVelocity, physicalState, "Apical", "Lumen"
+)
+local darcyApicalFlow = IntegralNormalComponentOnManifold(
+    darcyMembraneVelocity, physicalState, "Apical", "Membrane"
+)
+local inletPressureMean = Integral(
+    physicalState, "p_stokes", "Inlet"
+) / Integral(1.0, physicalState, "Inlet")
+local outletPressureMean = Integral(
+    physicalState, "p_stokes", "Outlet"
+) / Integral(1.0, physicalState, "Outlet")
+print(string.format(
+    "Apical pressure-trace jump L2 (diagnostic, not constrained): %.6e",
+    pressureTraceJumpL2
+))
+print(string.format(
+    "Mean Stokes pressure: Inlet=%.6e Pa, Outlet=%.6e Pa; OuterWall=%.6e Pa",
+    density * 1.0e-6 * inletPressureMean,
+    density * 1.0e-6 * outletPressureMean, outerPressurePa
+))
+print(string.format(
+    "Lumen outward flows: Inlet=%.6e, Outlet=%.6e, Apical=%.6e, balance=%.6e mm^3/s",
+    stokesInletFlow, stokesOutletFlow, stokesApicalFlow,
+    stokesInletFlow + stokesOutletFlow + stokesApicalFlow
+))
+local imposedInflow = -stokesInletFlow
+local conservativeLeakFlow = imposedInflow - stokesOutletFlow
+print(string.format(
+    "Conservative flow split: Outlet=%.3f%%, leakage=%.3f%% of inlet",
+    100.0 * stokesOutletFlow / imposedInflow,
+    100.0 * conservativeLeakFlow / imposedInflow
+))
+print(string.format(
+    "Raw Apical surface integral=%.3f%% of inlet; quadrature/discrete balance offset=%.6e mm^3/s",
+    100.0 * stokesApicalFlow / imposedInflow,
+    stokesInletFlow + stokesOutletFlow + stokesApicalFlow
+))
+print(string.format(
+    "Apical diagnostic: Stokes=%.6e, raw Darcy-gradient=%.6e, sum=%.6e mm^3/s",
+    stokesApicalFlow, darcyApicalFlow,
+    stokesApicalFlow + darcyApicalFlow
+))
+
+local function vectorComponents(vectorData)
+    local components = {}
+    for component = 0, 2 do
+        components[component + 1] = UserVectorEntryAdapter3d()
+        components[component + 1]:set_vector(vectorData, component)
+    end
+    return components
 end
+local darcyMembraneVelocityComponents = vectorComponents(darcyMembraneVelocity)
+local darcyInterVelocityComponents = vectorComponents(darcyInterVelocity)
 
 stokesOut = VTKOutput()
 stokesOut:clear_selection()
@@ -428,27 +542,37 @@ stokesOut:select_nodal({"u", "v", "w"}, "stokes_velocity_mm_s")
 stokesOut:select_nodal("u", "u")
 stokesOut:select_nodal("v", "v")
 stokesOut:select_nodal("w", "w")
-stokesOut:select_nodal("pressure", "stokes_pressure_kinematic")
+stokesOut:select_nodal("p_stokes", "stokes_pressure_kinematic")
 stokesOut:print_subsets(
-    vtk_file_name .. "_lumen", stokesState, "Lumen", 0, 0.0
+    vtk_file_name .. "_lumen", physicalState, "Lumen", 0, 0.0
 )
 
-darcyOut = VTKOutput()
-darcyOut:clear_selection()
-darcyOut:select_nodal("darcyPressure", "darcy_pressure_kinematic")
-darcyOut:select_element(darcyVelocity, "darcy_velocity_mm_s")
-darcyOut:select_element(darcyVelocityComponents[1], "u")
-darcyOut:select_element(darcyVelocityComponents[2], "v")
-darcyOut:select_element(darcyVelocityComponents[3], "w")
-darcyOut:print_subsets(
-    vtk_file_name .. "_inter", darcyState, "Inter", 0, 0.0
+local function writeDarcyOutput(suffix, subset, velocity, components)
+    local output = VTKOutput()
+    output:clear_selection()
+    output:select_nodal("p_darcy_scaled", "darcy_pressure_kinematic")
+    output:select_element(velocity, "darcy_velocity_mm_s")
+    output:select_element(components[1], "u")
+    output:select_element(components[2], "v")
+    output:select_element(components[3], "w")
+    output:print_subsets(
+        vtk_file_name .. suffix, physicalState, subset, 0, 0.0
+    )
+end
+writeDarcyOutput(
+    "_membrane", "Membrane", darcyMembraneVelocity,
+    darcyMembraneVelocityComponents
+)
+writeDarcyOutput(
+    "_inter", "Inter", darcyInterVelocity,
+    darcyInterVelocityComponents
 )
 
 local solve_elapsed_time = GetClockS() - solve_start_time
 local total_elapsed_time = GetClockS() - total_start_time
 print(string.format(
-    "Partitioned Stokes--Darcy GMG runtime: %.6f mins",
-    solve_elapsed_time / 60.0
+    "Monolithic Stokes--Darcy %s runtime: %.6f mins",
+    solverSetup, solve_elapsed_time / 60.0
 ))
 print(string.format(
     "Total script runtime:             %.6f mins",
