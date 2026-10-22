@@ -72,7 +72,7 @@ interPermeabilityM2 = 1.0e-14     -- interstitial Darcy permeability [m^2]
 bjsInterfacePermeabilityM2 = 1.0e-12 -- effective BJS slip permeability [m^2]
 bjsAlpha = 0.2                    -- dimensionless BJS coefficient
 density = 1000.0                  -- [kg/m^3]
-outerPressurePa = 4.6             -- [Pa], calibrated interstitial back-pressure
+outerPressurePa = 28.7            -- [Pa], calibrated interstitial back-pressure
 darcyPressureScale = 1.0e4        -- algebraic only; output is rescaled physically
 normalVelocityStabilization = 1.0e3
                                     -- Apical normal impedance [mm/s]
@@ -279,13 +279,13 @@ for _, row in ipairs({
     coupledDisc:add(interfaceTraction)
 end
 
--- Eliminate the duplicate Darcy trace on Apical:
+-- Eliminate the duplicate Darcy trace on Apical and on its endpoint rim:
 --     p_darcy_scaled = p_stokes / darcyPressureScale.
 -- The eliminated Darcy conservation row is added to the Stokes continuity row.
 -- Consequently this one operation imposes physical pressure continuity and
 -- balances the Stokes and Darcy normal fluxes without double-counting either.
 pressureContinuity = PressureTraceConstraint(
-    "p_stokes", "p_darcy_scaled", "Apical"
+    "p_stokes", "p_darcy_scaled", "Apical,TripleJunction"
 )
 pressureContinuity:set_pressure_scale(darcyPressureScale)
 
@@ -295,14 +295,15 @@ pressureContinuity:set_pressure_scale(darcyPressureScale)
 local stokesVelocity = stokesEq:velocity()
 
 -- Coupled user data must see both fields on the elements adjacent to Apical.
--- Pin only their non-physical extensions; never pin the Apical trace itself.
+-- Pin only their non-physical extensions; never pin the Apical trace or the
+-- TripleJunction rim, where both physical pressures must remain continuous.
 inactiveDarcy = DirichletBoundary()
 inactiveDarcy:add(
     0.0, "p_darcy_scaled", "Lumen,Inlet,Outlet"
 )
 inactiveStokes = DirichletBoundary()
 inactiveStokes:add(
-    0.0, "p_stokes", "Membrane,Basolateral,MembraneWall,TripleJunction"
+    0.0, "p_stokes", "Membrane,Basolateral,MembraneWall"
 )
 
 coupledDisc:add(darcyMembraneEq)
@@ -565,7 +566,7 @@ local outletPressureMean = Integral(
     physicalState, "p_stokes", "Outlet"
 ) / Integral(1.0, physicalState, "Outlet")
 print(string.format(
-    "Apical pressure-trace jump L2 (constraint excludes TripleJunction rings): %.6e",
+    "Apical pressure-trace jump L2 (including constrained endpoint rings): %.6e",
     pressureTraceJumpL2
 ))
 print(string.format(
