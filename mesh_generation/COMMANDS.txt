@@ -27,6 +27,8 @@ What it does:
   - Builds graded Inter tetrahedra and the OuterWall box.
   - Uses anisotropy 4 on straight paths and approaches anisotropy 1 at bends.
   - Writes the coarse mesh and one globally refined inspection mesh.
+  - Validates the coarse mesh and every written refinement level, and aborts
+    immediately on inverted/degenerate tetrahedra or topology/interface errors.
 
 
 2. Large-radius and thick-membrane mesh
@@ -50,6 +52,61 @@ What it does:
   - Scales the centerline by 6 so the enlarged tube remains geometrically safe.
   - Controls box clearance independently in X, Y, and Z.
   - Writes the coarse mesh plus two globally conforming refinement levels.
+
+
+2a. Strictly straight tube with unchanged SWC endpoints
+---------------------------------------------------------
+
+  /Users/alhilaba/UG4_promesh_ogrid/bin/ugshell \
+    -ex swc_to_neurite_projector_nephron_final_pipeline.lua -- \
+    -swc "../Nephron traces/straight_nephron_outerwall_cell_centered.swc" \
+    -radius 15 \
+    -membraneThickness 2 \
+    -centerlineScale 1 \
+    -resampleSpacing 5 \
+    -BoxRefs 4 \
+    -useTraceEndpoints 1 \
+    -padding 300 \
+    -terminalPaddingFactor 0 \
+    -numRefs 0 \
+    -out "../runs/straight_nephron_no_bend.ugx"
+
+What it does:
+  - Keeps every smoothed SWC centerline coordinate unchanged.
+  - Uses the existing first and last SWC points as Inlet and Outlet.
+  - Places the normal OuterWall faces at those endpoints.
+  - Translates the structured OuterWall grid so the endpoints occupy the
+    centers of their nearest wall cells; it does not bend the nephron toward
+    those cells.
+  - Normalizes SWC type fields so only the first sample is a root marker.
+
+
+2b. Strictly straight tube with conforming prismatic Inter
+------------------------------------------------------------
+
+  /Users/alhilaba/UG4_promesh_ogrid/bin/ugshell \
+    -ex swc_to_neurite_projector_nephron_final_pipeline.lua -- \
+    -swc "../Nephron traces/straight_nephron_outerwall_cell_centered.swc" \
+    -radius 15 \
+    -membraneThickness 2 \
+    -centerlineScale 1 \
+    -resampleSpacing 5 \
+    -BoxRefs 4 \
+    -useTraceEndpoints 1 \
+    -padding 300 \
+    -terminalPaddingFactor 0 \
+    -interMesh prism \
+    -numRefs 2 \
+    -out "../runs/straight_nephron_prism_inter.ugx"
+
+What it does:
+  - Sweeps a graded triangular square-minus-circle cross-section along the
+    strictly straight centerline to create a conforming prismatic Inter.
+  - Keeps Basolateral as ordinary shared Membrane/Inter quadrilaterals, with
+    no hanging interface constraints and no prism-to-tetrahedron transition.
+  - Writes and validates r0, r1, and r2 meshes. The current prismatic path is
+    intentionally restricted to the single straight-control geometry.
+  - Keep the default `-interMesh tet` for curved or multiple-nephron cases.
 
 
 3. Explicit adaptive-refinement controls
@@ -127,6 +184,8 @@ What it does:
   - Loads an existing UGX containing its NeuriteProjector and npSurfParams.
   - Applies the requested number of conforming global refinements.
   - Preserves projector-based Apical and Basolateral geometry.
+  - Repairs orientation after every refinement, removes detached vertices,
+    validates the saved result, and aborts if any structural check fails.
 
 
 7. Check the ProMesh GUI-style refinement path
@@ -168,3 +227,7 @@ Important notes
   - numRefs writes flat inspection meshes. The flow solver builds its multigrid
     hierarchy in memory from the coarse projector-backed UGX.
   - Generated files should go in ../runs, not in mesh_generation.
+  - Validation is enabled by default in both generation and standalone
+    refinement. Do not use -validate 0 for production meshes. It exists only
+    for diagnostic fixtures with deliberately different boundary subsets;
+    those must still be checked explicitly with validate_ugx_mesh.py.

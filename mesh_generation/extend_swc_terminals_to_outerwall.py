@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Extend unbranched SWC terminal paths to a fixed padded axis-aligned box.
+"""Place unbranched SWC terminal paths on a fixed axis-aligned box.
 
 The input is expected to use the mesh coordinate unit already (millimetres in
 the nephron pipeline).  The output carries UG4 metadata comments containing the
-fixed box bounds.  Each terminal transition is a low-bending cubic Bezier curve
-followed by a straight wall-normal tail.  The final SWC segments are therefore
-normal to the selected box face.
+fixed box bounds.  The default mode extends each terminal with a low-bending
+cubic Bezier transition followed by a straight wall-normal tail.  The optional
+``--endpoints-only`` mode leaves every centerline coordinate unchanged and
+moves the structured box grid instead: the endpoint planes become box faces
+and the tangential box bounds are shifted so each endpoint lies at the center
+of its nearest OuterWall cell.
 """
 
 from __future__ import annotations
@@ -164,6 +167,85 @@ def fixed_box(nodes: Sequence[Node], padding: Vec) -> tuple[Vec, Vec]:
     )
 
 
+def endpoint_aligned_box(chains: Sequence[Sequence[Node]], initial_min: Vec,
+                         initial_max: Vec, box_refs: int) -> tuple[Vec, Vec, list[str]]:
+    """Fit box faces/grid to existing endpoints without moving the centerline."""
+    box_min = list(initial_min)
+    box_max = list(initial_max)
+    terminals: list[tuple[str, Vec, int, int]] = []
+    diagnostics: list[str] = []
+
+    # Determine terminal faces from the unmodified endpoint tangents.
+    for index, chain in enumerate(chains, start=1):
+        for end_name, endpoint, tangent in (
+            ("root", chain[0], normalize(sub(chain[0].p, chain[1].p))),
+            ("tip", chain[-1], normalize(sub(chain[-1].p, chain[-2].p))),
+        ):
+            axis, sign, _, _, alignment = choose_face(
+                endpoint.p, tangent, initial_min, initial_max
+            )
+            terminals.append((f"nephron {index} {end_name}", endpoint.p, axis, sign))
+            if sign < 0:
+                box_min[axis] = endpoint.p[axis]
+            else:
+                box_max[axis] = endpoint.p[axis]
+            diagnostics.append(
+                f"nephron {index} {end_name}: {'xyz'[axis]}"
+                f"{'max' if sign > 0 else 'min'}, alignment={alignment:.6f}"
+            )
+
+    if any(box_min[d] >= box_max[d] for d in range(3)):
+        raise ValueError("Endpoint faces produce an invalid OuterWall box")
+
+    # A translation preserves each box extent and mesh-cell size. For every
+    # tangential coordinate, translate the grid by the smallest correction
+    # that places the endpoint at the center of its currently nearest cell.
+    cells = 1 << box_refs
+    corrections: dict[int, list[float]] = {0: [], 1: [], 2: []}
+    for _, point, normal_axis, _ in terminals:
+        for dimension in range(3):
+            if dimension == normal_axis:
+                continue
+            extent = box_max[dimension] - box_min[dimension]
+            scaled = (point[dimension] - box_min[dimension]) * cells / extent
+            cell = max(0, min(cells - 1, int(math.floor(scaled))))
+            center = box_min[dimension] + (cell + 0.5) * extent / cells
+            corrections[dimension].append(point[dimension] - center)
+
+    tolerance = 1e-10
+    for dimension, values in corrections.items():
+        if not values:
+            continue
+        correction = sum(values) / len(values)
+        if any(abs(value - correction) > tolerance for value in values):
+            raise ValueError(
+                "Existing endpoints cannot all be centered by one structured-box "
+                f"translation along {'xyz'[dimension]}"
+            )
+        box_min[dimension] += correction
+        box_max[dimension] += correction
+
+    # Verify face contact and exact cell centering after all translations.
+    for label, point, axis, sign in terminals:
+        plane = box_max[axis] if sign > 0 else box_min[axis]
+        if abs(point[axis] - plane) > tolerance:
+            raise ValueError(f"{label} no longer lies on its selected box face")
+        indices = []
+        for dimension in range(3):
+            if dimension == axis:
+                continue
+            extent = box_max[dimension] - box_min[dimension]
+            scaled = (point[dimension] - box_min[dimension]) * cells / extent
+            cell = max(0, min(cells - 1, int(math.floor(scaled))))
+            center = box_min[dimension] + (cell + 0.5) * extent / cells
+            if abs(point[dimension] - center) > tolerance:
+                raise ValueError(f"{label} is not centered in an OuterWall cell")
+            indices.append(cell)
+        diagnostics.append(f"{label}: unchanged endpoint centered in cell={tuple(indices)}")
+
+    return tuple(box_min), tuple(box_max), diagnostics
+
+
 def choose_face(p: Vec, tangent: Vec, box_min: Vec, box_max: Vec) -> tuple[int, int, Vec, float, float]:
     candidates = []
     for axis in range(3):
@@ -306,7 +388,7 @@ def extend_chain(chain: Sequence[Node], box_min: Vec, box_max: Vec, spacing: flo
     return output, diagnostics
 
 
-def write_swc(path: Path, chains: Sequence[Sequence[tuple[Vec, float, int]]], comments: Sequence[str], box_min: Vec, box_max: Vec) -> None:
+def write_swc(path: Path, chains: Sequence[Sequence[tuple[Vec, float, int]]], comments: Sequence[str], box_min: Vec, box_max: Vec, endpoints_only: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as out:
         out.write("# UG4_TERMINALS_ON_OUTER_WALL 1\n")
@@ -317,7 +399,10 @@ def write_swc(path: Path, chains: Sequence[Sequence[tuple[Vec, float, int]]], co
             ))
             + "\n"
         )
-        out.write("# Terminal extensions use low-bending cubic transitions and straight wall-normal tails.\n")
+        if endpoints_only:
+            out.write("# Existing SWC endpoints are unchanged and centered in OuterWall cells.\n")
+        else:
+            out.write("# Terminal extensions use low-bending cubic transitions and straight wall-normal tails.\n")
         for comment in comments:
             out.write(comment + "\n")
         next_id = 1
@@ -353,6 +438,8 @@ def main() -> None:
                         help="Outer-box refinement level used to center each terminal in its wall cell")
     parser.add_argument("--min-padding-factor", type=float, default=25.0,
                         help="minimum box padding as a multiple of the largest outer radius")
+    parser.add_argument("--endpoints-only", action="store_true",
+                        help="keep the SWC centerline unchanged; fit and align the box to its endpoints")
     args = parser.parse_args()
     requested_padding = (
         args.padding if args.padding_x is None else args.padding_x,
@@ -376,19 +463,29 @@ def main() -> None:
             f"{effective_padding} mesh units to limit terminal curvature."
         )
     box_min, box_max = fixed_box(nodes, effective_padding)
-    extended = []
+    output_chains = []
     diagnostics = []
-    for index, chain in enumerate(chains, start=1):
-        result, messages = extend_chain(
-            chain, box_min, box_max, args.spacing, args.box_refs, f"nephron {index}"
+    if args.endpoints_only:
+        box_min, box_max, diagnostics = endpoint_aligned_box(
+            chains, box_min, box_max, args.box_refs
         )
-        extended.append(result)
-        diagnostics.extend(messages)
-    write_swc(args.output, extended, comments, box_min, box_max)
+        output_chains = [
+            [(node.p, node.radius, node.kind) for node in chain]
+            for chain in chains
+        ]
+    else:
+        for index, chain in enumerate(chains, start=1):
+            result, messages = extend_chain(
+                chain, box_min, box_max, args.spacing, args.box_refs, f"nephron {index}"
+            )
+            output_chains.append(result)
+            diagnostics.extend(messages)
+    write_swc(args.output, output_chains, comments, box_min, box_max,
+              endpoints_only=args.endpoints_only)
     print(f"Fixed OuterWall bounds: min={box_min}, max={box_max}")
     for message in diagnostics:
         print(message)
-    print(f"Extended SWC: {args.output}")
+    print(f"{'Endpoint-aligned' if args.endpoints_only else 'Extended'} SWC: {args.output}")
 
 
 if __name__ == "__main__":

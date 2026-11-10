@@ -35,6 +35,10 @@ cfg.smoother = util.GetParam("-smoother",
 	script_dir .. "/quadratic_interpolate_swc.py")
 cfg.readySwc = util.GetParam("-readySwc", "")
 cfg.extendTerminals = util.GetParamNumber("-extendTerminals", 1) ~= 0
+-- Keep the supplied centerline exactly unchanged and fit the structured
+-- OuterWall grid to its endpoints. The grid bounds are translated so each
+-- terminal is centered in the nearest wall cell; the nephron is never bent.
+cfg.useTraceEndpoints = util.GetParamNumber("-useTraceEndpoints", 0) ~= 0
 cfg.terminalExtender = util.GetParam("-terminalExtender",
 	script_dir .. "/extend_swc_terminals_to_outerwall.py")
 cfg.terminalPaddingFactor = util.GetParamNumber("-terminalPaddingFactor", 25.0)
@@ -78,6 +82,7 @@ cfg.interNearEdgeFactor = util.GetParamNumber("-interNearEdgeFactor", 2.0)
 cfg.interNearDistanceFactor = util.GetParamNumber("-interNearDistanceFactor", 1.5)
 cfg.interFarDistanceFactor = util.GetParamNumber("-interFarDistanceFactor", 6.0)
 cfg.interFarEdgeFactor = util.GetParamNumber("-interFarEdgeFactor", 6.0)
+cfg.interMesh = util.GetParam("-interMesh", "tet")
 cfg.ogrid = math.floor(util.GetParamNumber("-ogrid", 10))
 -- Keep one lumen-midpoint support ring between the center and Apical ring.
 -- Removing it makes projected cross-sectional refinement connect large child
@@ -90,6 +95,11 @@ cfg.coarseLumenCenterOnly = util.GetParamNumber("-coarseLumenCenterOnly", 0) ~= 
 -- memory. Cross-sectional-only refinement remains experimental (-crossOnly 1).
 cfg.numRefs = math.floor(util.GetParamNumber("-numRefs", 0))
 cfg.crossOnly = util.GetParamNumber("-crossOnly", 0) ~= 0
+-- Treat structural validation as part of mesh generation, not as an optional
+-- solver-debugging step.  This may be disabled only for special diagnostic
+-- fixtures with non-production boundary semantics.
+cfg.validate = util.GetParamNumber("-validate", 1) ~= 0
+cfg.validator = util.GetParam("-validator", script_dir .. "/validate_ugx_mesh.py")
 -- The non-terminal box clearance is tied both to the centerline and tube.
 cfg.padding = util.GetParamNumber("-padding",
 	math.max(10.0 * cfg.centerlineScale, 2.0 * requested_outer_radius))
@@ -126,6 +136,15 @@ local function ensure_dir(path)
 		local ok = os.execute("mkdir -p " .. shell_quote(path))
 		assert(ok == true or ok == 0, "Could not create directory: " .. path)
 	end
+end
+
+local function validate_ugx(path)
+	if not cfg.validate then return end
+	print("Validating generated mesh: " .. path)
+	local ok = os.execute("python3 " .. shell_quote(cfg.validator)
+		.. " " .. shell_quote(path))
+	assert(ok == true or ok == 0,
+		"Mesh validation failed; refusing to continue with: " .. path)
 end
 
 local function assert_positive(name, value)
@@ -304,17 +323,6 @@ local function assert_neurite_projector_ugx(path)
 		"UGX is missing the terminal TripleJunction subset: " .. path)
 end
 
-local function refine_with_promesh(src, dst, refs)
-	local mesh = Mesh()
-	assert(LoadMesh(mesh, src), "LoadMesh failed: " .. src)
-	for i = 1, refs do
-		SelectAll(mesh)
-		print("  projected refine " .. i .. " / " .. refs)
-		Refine(mesh)
-	end
-	assert(SaveMesh(mesh, dst), "SaveMesh failed: " .. dst)
-end
-
 assert(cfg.swc ~= "", "Pass an SWC file with -swc <path>")
 assert(cfg.out ~= "", "Pass an output path with -out <path>")
 assert_positive("anisotropy", cfg.anisotropy)
@@ -328,6 +336,8 @@ assert(cfg.interFarEdgeFactor >= cfg.interNearEdgeFactor,
 assert(cfg.interNearDistanceFactor >= 0.0
 	and cfg.interFarDistanceFactor > cfg.interNearDistanceFactor,
 	"Inter distance factors require 0 <= near < far")
+assert(cfg.interMesh == "tet" or cfg.interMesh == "prism",
+	"-interMesh must be 'tet' or 'prism'")
 assert(cfg.ogrid >= 4, "ogrid must be an integer >= 4")
 assert_positive("padding", cfg.padding)
 assert_positive("paddingX", cfg.paddingX)
@@ -400,11 +410,12 @@ local lumen_scale = cfg.radius / outer_radius
 configure_adaptive_nephron_meshing(
 	cfg.adaptiveAnisotropy, cfg.bendAnisotropy, cfg.bendChordErrorFactor,
 	cfg.gradedInter, cfg.interNearEdgeFactor, cfg.interNearDistanceFactor,
-	cfg.interFarDistanceFactor, cfg.interFarEdgeFactor)
+	cfg.interFarDistanceFactor, cfg.interFarEdgeFactor,
+	cfg.interMesh == "prism")
 
-if cfg.extendTerminals then
+if cfg.useTraceEndpoints or cfg.extendTerminals then
 	local extended_swc = strip_extension(cfg.out) .. "_outerwall_extended.swc"
-	local extension_command = table.concat({
+	local extension_parts = {
 		"python3", shell_quote(cfg.terminalExtender), shell_quote(import_swc),
 		"-o", shell_quote(extended_swc),
 		"--padding", tostring(cfg.padding * MESH_LENGTH_SCALE),
@@ -414,7 +425,11 @@ if cfg.extendTerminals then
 		"--spacing", tostring(cfg.terminalSpacing * MESH_LENGTH_SCALE),
 		"--box-refs", tostring(cfg.boxRefs),
 		"--min-padding-factor", tostring(cfg.terminalPaddingFactor)
-	}, " ")
+	}
+	if cfg.useTraceEndpoints then
+		extension_parts[#extension_parts + 1] = "--endpoints-only"
+	end
+	local extension_command = table.concat(extension_parts, " ")
 	local extension_ok = os.execute(extension_command)
 	assert(extension_ok == true or extension_ok == 0,
 		"Terminal-to-OuterWall SWC extension failed")
@@ -435,6 +450,10 @@ import_nephron_with_membrane_and_inter_from_swc(import_swc, coarse_ugx,
 	cfg.interQuality, cfg.boxRefs, cfg.ogrid, cfg.coarseLumenCenterOnly,
 	cfg.crossOnly)
 assert_neurite_projector_ugx(coarse_ugx)
+validate_ugx(coarse_ugx)
+for level = 1, cfg.numRefs do
+	validate_ugx(strip_extension(coarse_ugx) .. "_refined_" .. level .. ".ugx")
+end
 
 local numVertices, numEdges, numFaces, numVolumes = count_mesh_elements(out_ugx)
 print("Vertices: " .. numVertices)
@@ -450,11 +469,13 @@ print("Graded Inter: " .. tostring(cfg.gradedInter) .. ", edge factors "
 	.. cfg.interNearEdgeFactor .. " -> " .. cfg.interFarEdgeFactor
 	.. ", distance factors " .. cfg.interNearDistanceFactor .. " -> "
 	.. cfg.interFarDistanceFactor)
+print("Inter mesh topology: " .. cfg.interMesh)
 print("Centerline scale: " .. cfg.centerlineScale)
 print("SWC resample spacing (um): " .. cfg.resampleSpacing)
 print("Terminal extension spacing (um): " .. cfg.terminalSpacing)
 print("OuterWall padding X/Y/Z (um): " .. cfg.paddingX .. " / "
 	.. cfg.paddingY .. " / " .. cfg.paddingZ)
 print("Mesh coordinate unit: mm")
-print("Terminal-to-OuterWall extension: " .. tostring(cfg.extendTerminals))
+print("Terminal mode: " .. (cfg.useTraceEndpoints and "unchanged trace endpoints"
+	or (cfg.extendTerminals and "extended to wall-cell centers" or "disabled")))
 print("Output: " .. out_ugx)

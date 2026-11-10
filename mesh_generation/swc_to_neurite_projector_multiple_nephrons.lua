@@ -355,7 +355,7 @@ local lumen_scale = cfg.radius / outer_radius
 configure_adaptive_nephron_meshing(
 	cfg.adaptiveAnisotropy, cfg.bendAnisotropy, cfg.bendChordErrorFactor,
 	cfg.gradedInter, cfg.interNearEdgeFactor, cfg.interNearDistanceFactor,
-	cfg.interFarDistanceFactor, cfg.interFarEdgeFactor)
+	cfg.interFarDistanceFactor, cfg.interFarEdgeFactor, false)
 import_multiple_nephrons_with_membrane_and_inter_from_swc(
 	import_swc, out_ugx, #swcs, lumen_scale, cfg.anisotropy,
 	cfg.numRefs, cfg.padding * MESH_LENGTH_SCALE, cfg.interQuality, cfg.boxRefs,
