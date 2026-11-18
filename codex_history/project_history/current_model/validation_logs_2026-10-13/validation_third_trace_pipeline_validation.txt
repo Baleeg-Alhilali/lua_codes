@@ -1,0 +1,21 @@
+mesh: /tmp/validation_third_trace_pipeline.ugx
+vertices: 10046
+volumes: tetrahedrons=37855, hexahedrons=2712, prisms=904, pyramids=0, octahedrons=0
+faces: triangles=77360, constraining_triangles=0, constrained_triangles=1808, quadrilaterals=9052, constraining_quadrilaterals=904, constrained_quadrilaterals=0
+minimum all-pairs edge ratio: 0.029488227 (volume 37864, hexahedrons)
+tetrahedra: inverted=0, exactly_zero=0, min_abs_signed_volume=1.69617989903e-10
+minimum normalized tetrahedron volume: 0.0108847482648 (tetrahedron 28589)
+serialized face adjacency: {1: 6036, 2: 83088}
+unmatched serialized faces: 0
+duplicate serialized face geometries: 0
+non-manifold volume faces (>2 neighbors): 0
+duplicate subset assignments: 0
+interface contract: production
+interface adjacency:
+  Apical: ('Lumen', 'Membrane')=904
+  Basolateral: ('Inter',)=1808, ('Membrane',)=904
+  Inlet: ('Lumen',)=8
+  Outlet: ('Lumen',)=8
+  OuterWall: ('Inter',)=3292
+  MembraneWall: ('Membrane',)=16
+VALIDATION: PASS

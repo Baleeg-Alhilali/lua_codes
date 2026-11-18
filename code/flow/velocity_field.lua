@@ -1,4 +1,14 @@
--- Resolve every relative input and output path from the Model directory.
+--------------------------------------------------------------------------------
+-- Model summary
+--------------------------------------------------------------------------------
+-- Solves steady low-Reynolds-number lumen flow with a parabolic inlet,
+-- prescribed Apical water leakage, and a natural traction-free outlet. This
+-- model intentionally contains no Darcy equation.
+
+--------------------------------------------------------------------------------
+-- Dependencies
+--------------------------------------------------------------------------------
+-- Resolves model-relative paths and loads the UG4 flow/projector toolchain.
 local __model_script = debug.getinfo(1, "S").source
 if __model_script:sub(1, 1) == "@" then __model_script = __model_script:sub(2) end
 if __model_script:sub(1, 1) ~= "/" then
@@ -38,20 +48,9 @@ Rabbit proximal-tubule water reabsorption:
   0.24 um/s through the wall, rounded here to 0.25 um/s.
   https://pmc.ncbi.nlm.nih.gov/articles/PMC436574/
 
-Default parallel run:
-  mpirun -np 8 ugshell -ex code/flow/velocity_field.lua
-
-Useful overrides:
+Runtime inputs (all other values are in the Parameters block below):
   -numRefs 2
-  -numPreRefs 0
-  -meanInletVelocity 800
-  -leakageVelocity 0.25
-  -lumenRadius 1.0
-  -pressureStabilization 1e-6
-  -solverReduction 1e-12
-  -inletProjectionCorrection 1.333333  (optional override at numRefs=2)
-  -grid ProMeshFiles/runs/3rd_trace_third_boxref5.ugx
-  -swc ProMeshFiles/runs/3rd_trace_third_boxref5_outer_radius_1p2.swc
+  -output Results/velocity_field_lumen_projected_after_2_refinements
 ]]
 
 ug_load_script("ug_util.lua")
@@ -64,27 +63,28 @@ AssertPluginsLoaded({"NavierStokes", "SuperLU6", "neuro_collection"})
 local totalStart = GetClockS()
 
 --------------------------------------------------------------------------------
--- Configuration
+-- Parameters
 --------------------------------------------------------------------------------
+-- Only -numRefs and -output are command-line inputs. All mesh, physics,
+-- discretization, and solver values are maintained here.
 
 local dim = 3
-local gridName = util.GetParam(
-    "-grid",
-    "ProMeshFiles/runs/3rd_trace_third_boxref5.ugx"
-)
-local centerlineName = util.GetParam(
-    "-swc",
+local gridName = "ProMeshFiles/runs/3rd_trace_third_boxref5.ugx"
+local centerlineName =
     "ProMeshFiles/runs/3rd_trace_third_boxref5_outer_radius_1p2.swc"
-)
 
 -- Two projector refinements are the default for this distributed version.
 local numRefs = math.floor(util.GetParamNumber("-numRefs", 2))
-local numPreRefs = math.floor(util.GetParamNumber("-numPreRefs", 0))
-local meanInletVelocity = util.GetParamNumber("-meanInletVelocity", 800.0) -- um/s
-local leakageVelocity = util.GetParamNumber("-leakageVelocity", 0.25)       -- um/s
-local lumenRadius = util.GetParamNumber("-lumenRadius", 1.0)                -- um
-local pressureStabilization = util.GetParamNumber("-pressureStabilization", 1.0e-6)
-local solverReduction = util.GetParamNumber("-solverReduction", 1.0e-12)
+local numPreRefs = 0
+local meanInletVelocity = 800.0       -- [um/s]
+local leakageVelocity = 0.25          -- [um/s]
+local lumenRadius = 1.0               -- [um]
+local pressureStabilization = 1.0e-6
+local outputFileName = util.GetParam(
+    "-output",
+    "Results/velocity_field_lumen_projected_after_"
+        .. numRefs .. "_refinements",
+    "VTK output prefix")
 
 -- NavierStokesInflow only constrains the nodes carried by the Inlet subset.
 -- On this swept cap, the remaining rim nodes belong to Apical, so the retained
@@ -94,10 +94,7 @@ if numRefs > 0 then
     local levelFactor = math.pow(2.0, numRefs)
     defaultProjectionCorrection = levelFactor / (levelFactor - 1.0)
 end
-local inletProjectionCorrection = util.GetParamNumber(
-    "-inletProjectionCorrection",
-    defaultProjectionCorrection
-)
+local inletProjectionCorrection = defaultProjectionCorrection
 
 -- Constant-density incompressible form divided by density.  The pressure
 -- unknown is therefore kinematic pressure p/rho; rho = 1 keeps the momentum
@@ -111,7 +108,6 @@ assert(meanInletVelocity > 0.0, "meanInletVelocity must be positive")
 assert(leakageVelocity >= 0.0, "leakageVelocity must be non-negative")
 assert(lumenRadius > 0.0, "lumenRadius must be positive")
 assert(pressureStabilization > 0.0, "pressureStabilization must be positive")
-assert(solverReduction > 0.0, "solverReduction must be positive")
 assert(inletProjectionCorrection > 0.0, "inletProjectionCorrection must be positive")
 
 if numRefs < 2 then
@@ -120,8 +116,56 @@ if numRefs < 2 then
 end
 
 --------------------------------------------------------------------------------
--- Centerline geometry for the curved inlet and wall conditions
+-- Mesh and approximation space
 --------------------------------------------------------------------------------
+-- Load the curved domain with its embedded refinement projectors, refine it,
+-- and construct the equal-order lumen approximation space.
+
+-- The stabilized equal-order discretization stores (u,v,w,p) together at
+-- every vertex, so a four-component CPU block is the valid 3D layout.
+InitUG(dim, AlgebraType("CPU", 4))
+print("MPI processes: " .. NumProcs())
+
+local dom = Domain()
+dom:create_additional_subset_handler("projSH")
+print("Loading and broadcasting the embedded neurite refinement projectors ...")
+LoadDomain(dom, gridName)
+assert(
+    util.CheckSubsets(
+        dom,
+        {"Lumen", "Membrane", "Basolateral", "Apical", "Inter",
+         "OuterWall", "Inlet", "Outlet"}
+    ),
+    "The domain is missing one or more required subsets"
+)
+print("The UGX ProjectionHandler was broadcast to every MPI rank; both "
+    .. "refinement passes use the same neurite projectors.")
+
+if numPreRefs > 0 then
+    local preRefiner = GlobalDomainRefiner(dom)
+    for i = 1, numPreRefs do
+        preRefiner:refine()
+    end
+    delete(preRefiner)
+end
+balancer.RefineAndRebalanceDomain(dom, numRefs - numPreRefs)
+
+print("Domain info:")
+print(dom:domain_info():to_string())
+
+local nsSpace = ApproximationSpace(dom)
+local lumenSupport = {"Lumen", "Apical", "Inlet", "Outlet"}
+nsSpace:add_fct({"u", "v", "w"}, "Lagrange", 1, lumenSupport)
+nsSpace:add_fct("p_lumen", "Lagrange", 1, "Lumen,Apical,Inlet,Outlet")
+nsSpace:init_levels()
+nsSpace:init_top_surface()
+nsSpace:print_statistic()
+
+--------------------------------------------------------------------------------
+-- Discretization and boundary conditions
+--------------------------------------------------------------------------------
+-- Define all mesh-aware inlet and leakage callbacks first, then assemble the
+-- lumen equation and its boundary conditions.
 
 local function loadCenterline(path)
     local points = {}
@@ -247,60 +291,6 @@ function ApicalLeakageVelocity(x, y, z, t, si)
     return scale * (x - qx), scale * (y - qy), scale * (z - qz)
 end
 
---------------------------------------------------------------------------------
--- Domain and approximation space
---------------------------------------------------------------------------------
-
--- The stabilized equal-order discretization stores (u,v,w,p) together at
--- every vertex, so a four-component CPU block is the valid 3D layout.
-InitUG(dim, AlgebraType("CPU", 4))
-print("MPI processes: " .. NumProcs())
-
--- Register projSH before loading so LoadDomain also restores the UGX-embedded
--- ProjectionHandler.  This mesh contains NeuriteProjectors on Basolateral and
--- Apical; they keep both curved tube surfaces on their spline geometry when
--- new vertices are created.
---
--- Register the additional handler so LoadDomain takes the UGX path that reads
--- its serialized ProjectionHandler.  The local UG4 loader broadcasts that
--- handler after installation, giving every MPI rank the same Basolateral and
--- Apical neurite projectors before distributed refinement begins.
-local dom = Domain()
-dom:create_additional_subset_handler("projSH")
-print("Loading and broadcasting the embedded neurite refinement projectors ...")
-LoadDomain(dom, gridName)
-assert(
-    util.CheckSubsets(
-        dom,
-        {"Lumen", "Membrane", "Basolateral", "Apical", "Inter",
-         "OuterWall", "Inlet", "Outlet"}
-    ),
-    "The domain is missing one or more required subsets"
-)
-print("The UGX ProjectionHandler was broadcast to every MPI rank; both "
-    .. "refinement passes use the same neurite projectors.")
-
--- Pre-refinement, if requested, must also use the loaded projector.
-if numPreRefs > 0 then
-    local preRefiner = GlobalDomainRefiner(dom)
-    for i = 1, numPreRefs do
-        preRefiner:refine()
-    end
-    delete(preRefiner)
-end
-balancer.RefineAndRebalanceDomain(dom, numRefs - numPreRefs)
-
-print("Domain info:")
-print(dom:domain_info():to_string())
-
-local nsSpace = ApproximationSpace(dom)
-local lumenSupport = {"Lumen", "Apical", "Inlet", "Outlet"}
-nsSpace:add_fct({"u", "v", "w"}, "Lagrange", 1, lumenSupport)
-nsSpace:add_fct("p_lumen", "Lagrange", 1, "Lumen,Apical,Inlet,Outlet")
-nsSpace:init_levels()
-nsSpace:init_top_surface()
-nsSpace:print_statistic()
-
 -- Normalize the parabola over the projected inlet geometry and its discrete P1
 -- trace, then apply the subset-trace correction calculated above.
 local inletIntegrationGridFunction = GridFunction(nsSpace)
@@ -326,7 +316,7 @@ print(string.format("Inlet area: %.9e um^2", math.abs(signedInletArea)))
 print(string.format("Parabolic peak: %.9e um/s", inletPeakVelocity))
 
 --------------------------------------------------------------------------------
--- Navier--Stokes equation and boundary conditions
+-- Lumen equation and boundary conditions
 --------------------------------------------------------------------------------
 
 local nsEq = NavierStokes("u,v,w,p_lumen", "Lumen", "fe")
@@ -353,44 +343,40 @@ nsDomainDisc:add(leakageBC)
 -- the natural zero-traction / no-stress condition.
 
 --------------------------------------------------------------------------------
--- Distributed iterative solver
+-- Solver
 --------------------------------------------------------------------------------
+-- Uses BiCGStab with projector-compatible geometric multigrid.
 
 util.solver.defaults.approxSpace = nsSpace
 
--- Overlapping ILU is used on each MPI partition.  Unlike the sequential Vanka
--- correction, this smoother also operates on parallel refinement levels.
--- Pressure stabilization is required for the equal-order P1/P1 pair and also
--- supplies the small pressure-block diagonal needed by ILU.
-local parallelSmoother = {
-    type = "ilu",
-    damping = 0.9,
-    overlap = true,
-    consistentInterfaces = true,
-    -- Pressure stabilization may be below ILU's generic 1e-8 pivot cutoff.
-    inversionEps = 1.0e-12
-}
-
 local linearSolverDesc = {
-    type = "bicgstab",
+    type = "bicgstab", -- alternative: "gmres"
     precond = {
-        type = "gmg",
+        type = "gmg", -- alternative: "ilu" for a single-level solve
         approxSpace = nsSpace,
         baseLevel = 0,
-        baseSolver = "superlu",
+        baseSolver = "superlu", -- alternative: iterative coarse solver
         gatheredBaseSolverIfAmbiguous = true,
-        cycle = "F",
+        cycle = "F", -- alternatives: "V", "W"
         preSmooth = 1,
         postSmooth = 1,
         rap = true,
-        smoother = parallelSmoother,
+        -- Overlapping ILU operates on every MPI refinement level. Pressure
+        -- stabilization supplies the small pressure-block diagonal it needs.
+        smoother = {
+            type = "ilu", -- alternatives: "jac", "gs"
+            damping = 0.9,
+            overlap = true,
+            consistentInterfaces = true,
+            inversionEps = 1.0e-12
+        },
         transfer = "std"
     },
     convCheck = {
         type = "standard",
         iterations = 200,
-        absolute = 1.0e-8,
-        reduction = solverReduction,
+        absolute = 1e-14,
+        reduction = 1.0e-12,
         verbose = true
     }
 }
@@ -402,15 +388,22 @@ local _, nsSolution = util.solver.SolveLinearProblem(nsDomainDisc, linearSolverD
 print(string.format("Lumen solve runtime: %.6f min", (GetClockS() - solveStart) / 60.0))
 
 --------------------------------------------------------------------------------
--- Output and mass-balance diagnostics
+-- Time discretization and initial values
 --------------------------------------------------------------------------------
+-- Steady model: no time discretization. SolveLinearProblem creates the zero
+-- initial state before applying the stationary linear solver.
+
+--------------------------------------------------------------------------------
+-- Output
+--------------------------------------------------------------------------------
+-- Writes lumen velocity/pressure and reports the inlet, leakage, outlet, and
+-- mass-balance fluxes.
 
 local lumenVelocityData = GridFunctionVectorData(nsSolution, "u,v,w")
 local lumenPressureData = GridFunctionNumberData(nsSolution, "p_lumen")
 -- The explicit name prevents this refined result from being confused with
 -- older base-grid files named velocity_field_lumen_t0000.vtu.
-local outputBase = "Results/velocity_field_lumen_projected_after_"
-    .. numRefs .. "_refinements"
+local outputBase = outputFileName
 
 local lumenOut = VTKOutput()
 lumenOut:clear_selection()

@@ -175,36 +175,38 @@ flowDomainDisc:add(flowInlet)
 flowDomainDisc:add(flowOutlet)
 flowDomainDisc:add(flowWall)
 
-local flowSmoother = ILU()
-flowSmoother:set_damp(0.7)
-flowSmoother:set_inversion_eps(1.0e-14)
-flowSmoother:enable_overlap(true)
-flowSmoother:enable_consistent_interfaces(true)
-
-local flowGMG = GeometricMultiGrid(flowSpace)
-flowGMG:set_base_level(numPreRefs)
-flowGMG:set_base_solver(AgglomeratingSolver(SuperLU()))
-flowGMG:set_gathered_base_solver_if_ambiguous(true)
-flowGMG:set_smoother(flowSmoother)
-flowGMG:set_cycle_type("V")
-flowGMG:set_num_presmooth(4)
-flowGMG:set_num_postsmooth(4)
-flowGMG:set_rap(false)
-flowGMG:set_transfer(StdTransfer())
-
 util.solver.defaults.approxSpace = flowSpace
 flowSolverDesc = {
-    type = "newton",
+    type = "newton", -- alternative for stationary Stokes: a linear solver
     convCheck = {
         type = "standard", iterations = 50,
-        absolute = 1.0e-14, reduction = 1.0e-12,
+        absolute = 1e-14, reduction = 1.0e-12,
         verbose = true
     },
     linSolver = {
-        type = "bicgstab", precond = flowGMG,
+        type = "bicgstab", -- alternative: "gmres"
+        precond = {
+            type = "gmg", -- alternative: "ilu" for a single-level solve
+            approxSpace = flowSpace,
+            baseLevel = 0,
+            baseSolver = "superlu", -- alternative: iterative coarse solver
+            gatheredBaseSolverIfAmbiguous = true,
+            smoother = {
+                type = "ilu", -- alternatives: "jac", "gs"
+                damping = 0.7,
+                inversionEps = 1.0e-14,
+                overlap = true,
+                consistentInterfaces = true
+            },
+            cycle = "V", -- alternative: "W"
+            preSmooth = 4,
+            postSmooth = 4,
+            rap = false,
+            transfer = "std"
+        },
         convCheck = {
             type = "standard", iterations = 150,
-            absolute = 1.0e-14, reduction = 1.0e-12,
+            absolute = 1e-14, reduction = 1.0e-12,
             verbose = true
         }
     }
@@ -277,14 +279,14 @@ transportDomainDisc:add(transportBoundary)
 
 util.solver.defaults.approxSpace = transportSpace
 transportSolverDesc = {
-    type = "newton",
+    type = "newton", -- alternative for linearized runs: a linear solver
     convCheck = {
         type = "standard", iterations = 100,
-        absolute = 1.0e-15,
+        absolute = 1e-14,
         reduction = 1.0e-15,
         verbose = true
     },
-    linSolver = "superlu"
+    linSolver = "superlu" -- alternative: an iterative descriptor for large systems
 }
 
 transportSolver = util.solver.CreateSolver(transportSolverDesc)

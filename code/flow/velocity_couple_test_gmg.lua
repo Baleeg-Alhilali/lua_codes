@@ -1,4 +1,13 @@
--- Resolve every relative input and output path from the Model directory.
+--------------------------------------------------------------------------------
+-- Model summary
+--------------------------------------------------------------------------------
+-- Legacy monolithic Stokes--Darcy--BJS cylinder-tube model solved with an
+-- all-iterative BiCGStab/GMG configuration.
+
+--------------------------------------------------------------------------------
+-- Dependencies
+--------------------------------------------------------------------------------
+-- Resolves paths and loads the UG4 flow, diffusion, and balancing utilities.
 local __model_script = debug.getinfo(1, "S").source
 if __model_script:sub(1, 1) == "@" then __model_script = __model_script:sub(2) end
 if __model_script:sub(1, 1) ~= "/" then
@@ -11,23 +20,22 @@ ChangeDirectory(MODEL_ROOT)
 ug_load_script("ug_util.lua")
 ug_load_script("util/load_balancing_util.lua")
 
--- Standalone monolithic Stokes--Darcy--BJS model with an all-iterative
--- BiCGStab/GMG solver. No other application script is loaded by this file.
 AssertPluginsLoaded({"NavierStokes", "ConvectionDiffusion"})
 
 total_start_time = GetClockS()
 
 --------------------------------------------------------------------------------
--- User configuration
+-- Parameters
 --------------------------------------------------------------------------------
+-- Only -numRefs and -output are terminal inputs. All model coefficients,
+-- boundary values, and iterative-solver controls are configured here.
 
 dim = 3
 
--- These are the only command-line parameters accepted by this script.
+-- Only -numRefs and -output are command-line inputs.
 numRefs = util.GetParamNumber("-numRefs", 2, "number of uniform refinements")
-bstokes = util.GetParamBool("-bstokes", true,
-    "true: Stokes flow; false: Navier--Stokes flow")
-vmax = util.GetParamNumber("-vmax", 3.0, "maximum inlet velocity [mm/s]")
+bstokes = true
+vmax = 3.0                         -- [mm/s]
 
 -- Geometry and physical parameters: edit values here, not on the command line.
 gridS = "long_tube"
@@ -41,37 +49,19 @@ bjsAlpha = 0.2                    -- dimensionless BJS coefficient
 density = 1000.0                  -- [kg/m^3]
 outerPressurePa = 0.0             -- pressure at OuterWall [Pa]
 
--- Solver parameters: edit values here, not on the command line.
-linearTolerance = 1.0e-10
-linearReduction = 1.0e-8
-linearMaxIters = 1000
-newtonTolerance = 1.0e-10
-newtonReduction = 1.0e-8
-newtonMaxIters = 30
-coarseTolerance = 1.0e-12
-coarseReduction = 1.0e-10
-coarseMaxIters = 500
-ilutThreshold = 1.0e-8
-gmgBaseLevel = 0
-gmgCycle = "V"
-gmgPreSmooth = 1
-gmgPostSmooth = 1
-gmgUseRAP = true
-
 -- MPI runs create .pvtu master files and one .vtu file per rank.
 local flowModelTag = bstokes and "stokes" or "navier_stokes"
-vtk_file_name = "Results/" .. gridS .. "_" .. flowModelTag
-    .. "_darcy_bjs_gmg_ref" .. numRefs
+vtk_file_name = util.GetParam(
+    "-output",
+    "Results/" .. gridS .. "_" .. flowModelTag
+        .. "_darcy_bjs_gmg_ref" .. numRefs,
+    "VTK output prefix")
 
 assert(numRefs >= 0, "numRefs must be non-negative")
 assert(vmax >= 0.0, "vmax must be non-negative")
 assert(permeabilityM2 > 0.0, "permeabilityM2 must be positive")
 assert(bjsAlpha > 0.0, "bjsAlpha must be positive")
 assert(density > 0.0, "density must be positive")
-assert(linearTolerance > 0.0 and linearReduction > 0.0,
-    "linear convergence tolerances must be positive")
-assert(linearMaxIters > 0 and coarseMaxIters > 0,
-    "solver iteration limits must be positive")
 
 -- Build every projected level before distributing the finished hierarchy.
 balancer.firstDistLvl = numRefs
@@ -84,8 +74,10 @@ print(string.format(
 ))
 
 --------------------------------------------------------------------------------
--- Domain
+-- Mesh and approximation space
 --------------------------------------------------------------------------------
+-- Loads and refines the straight tube, then places both Stokes and scaled
+-- Darcy unknowns in one monolithic approximation space.
 
 local function file_contains(path, needle)
     local file = assert(io.open(path, "r"), "Cannot open grid file: " .. path)
@@ -135,7 +127,7 @@ print("Domain info:")
 print(dom:domain_info():to_string())
 
 --------------------------------------------------------------------------------
--- Monolithic approximation space
+-- Monolithic approximation-space fields
 --------------------------------------------------------------------------------
 
 approxSpace = ApproximationSpace(dom)
@@ -161,8 +153,10 @@ print("Approximation space:")
 approxSpace:print_statistic()
 
 --------------------------------------------------------------------------------
--- Physical coefficients and boundary data
+-- Discretization and boundary conditions
 --------------------------------------------------------------------------------
+-- Defines the geometry-aware callbacks first and assembles the Stokes, Darcy,
+-- interface-resistance, BJS, inlet, outlet, and pressure-reference terms.
 
 local permeability = permeabilityM2 * 1.0e6 -- [mm^2]
 local darcyMobility = permeability / viscosity
@@ -213,7 +207,7 @@ function darcyNormalZ(x, y, z, t, si)
 end
 
 --------------------------------------------------------------------------------
--- Stokes/Navier--Stokes problem in Lumen
+-- Stokes/Navier--Stokes equation in Lumen
 --------------------------------------------------------------------------------
 
 stokesEq = NavierStokesFV1({"u", "v", "w", "pressure"}, {"Lumen"})
@@ -242,7 +236,7 @@ stokesBJS:set_sliding_factor(bjsFriction)
 stokesBJS:set_sliding_limit(0.0)
 
 --------------------------------------------------------------------------------
--- Darcy problem and monolithic interface coupling
+-- Darcy equation and monolithic interface coupling
 --------------------------------------------------------------------------------
 
 darcyEq = ConvectionDiffusionFV1("darcyPressure", "Inter")
@@ -299,8 +293,10 @@ coupledDisc:add(inactiveDarcy)
 coupledDisc:add(inactiveStokes)
 
 --------------------------------------------------------------------------------
--- BiCGStab with geometric multigrid preconditioning
+-- Solver
 --------------------------------------------------------------------------------
+-- Solves the coupled system with an outer Krylov iteration preconditioned by
+-- geometric multigrid and prints all convergence diagnostics.
 
 local solve_start_time = GetClockS()
 util.solver.defaults.approxSpace = approxSpace
@@ -311,61 +307,55 @@ coupledState:set(0.0)
 coupledDisc:adjust_solution(coupledState)
 coupledDisc:assemble_linear(coupledMatrix, coupledRhs)
 
-local gmgPreconditioner = {
-    type = "gmg",
+local linearSolverDesc = {
+    type = "bicgstab", -- alternatives: "gmres" or "cg" for compatible operators
+    precond = {
+    type = "gmg", -- alternative: "ilu" for a single-level solve
     approxSpace = approxSpace,
     discretization = coupledDisc,
-    baseLevel = gmgBaseLevel,
+    baseLevel = 0,
     baseSolver = {
-        type = "bicgstab",
+        type = "bicgstab", -- alternative: "superlu" for a direct coarse solve
         precond = {
-            type = "ilut",
-            threshold = ilutThreshold,
+            type = "ilut", -- alternative: "ilu"
+            threshold = 1.0e-8,
             ordering = "NativeCuthillMcKee"
         },
         convCheck = {
             type = "standard",
-            iterations = coarseMaxIters,
-            absolute = coarseTolerance,
-            reduction = coarseReduction,
+            iterations = 500,
+            absolute = 1e-14,
+            reduction = 1.0e-10,
             verbose = true
         }
     },
     smoother = {
-        type = "ilut",
-        threshold = ilutThreshold,
+        type = "ilut", -- alternative: "ilu"
+        threshold = 1.0e-8,
         ordering = "NativeCuthillMcKee"
     },
-    cycle = gmgCycle,
-    preSmooth = gmgPreSmooth,
-    postSmooth = gmgPostSmooth,
-    rap = gmgUseRAP,
+    cycle = "V", -- alternative: "W"
+    preSmooth = 1,
+    postSmooth = 1,
+    rap = true,
     transfer = {
         type = "std",
         restrictionDamp = 1.0,
         prolongationDamp = 1.0,
         enableP1LagrangeOptimization = true
     }
+    },
+    convCheck = {
+        type = "standard",
+        iterations = 1000,
+        absolute = 1e-14,
+        reduction = 1.0e-8,
+        verbose = true
+    }
 }
 
-local function outerLinearSolverDescription()
-    return {
-        type = "bicgstab",
-        precond = gmgPreconditioner,
-        convCheck = {
-            type = "standard",
-            iterations = linearMaxIters,
-            absolute = linearTolerance,
-            reduction = linearReduction,
-            verbose = true
-        }
-    }
-end
-
 print("Solving the monolithic Stokes--Darcy initial field ...")
-local iterativeSolver = util.solver.CreateLinearSolver(
-    outerLinearSolverDescription()
-)
+local iterativeSolver = util.solver.CreateLinearSolver(linearSolverDesc)
 
 iterativeSolver:init(coupledMatrix, coupledState)
 assert(iterativeSolver:apply(coupledState, coupledRhs),
@@ -373,9 +363,9 @@ assert(iterativeSolver:apply(coupledState, coupledRhs),
 
 if not bstokes then
     stokesEq:set_stokes(false)
-    local nonlinearSolver = util.solver.CreateSolver({
-        type = "newton",
-        linSolver = outerLinearSolverDescription(),
+    local solverDesc = {
+        type = "newton", -- alternative: use the linear descriptor for Stokes
+        linSolver = linearSolverDesc,
         lineSearch = {
             type = "standard",
             maxSteps = 10,
@@ -386,12 +376,13 @@ if not bstokes then
         },
         convCheck = {
             type = "standard",
-            iterations = newtonMaxIters,
-            absolute = newtonTolerance,
-            reduction = newtonReduction,
+            iterations = 30,
+            absolute = 1e-14,
+            reduction = 1.0e-8,
             verbose = true
         }
-    })
+    }
+    local nonlinearSolver = util.solver.CreateSolver(solverDesc)
     nonlinearSolver:init(AssembledOperator(coupledDisc))
     nonlinearSolver:prepare(coupledState)
     print("Applying the monolithic Navier--Stokes--Darcy correction ...")
@@ -400,8 +391,15 @@ if not bstokes then
 end
 
 --------------------------------------------------------------------------------
--- Darcy velocity and VTK output
+-- Time discretization and initial values
 --------------------------------------------------------------------------------
+-- Steady model: no time discretization; coupledState is initialized to zero
+-- before the assembled linear solve.
+
+--------------------------------------------------------------------------------
+-- Output
+--------------------------------------------------------------------------------
+-- Reconstructs Darcy velocity and writes separate lumen and porous VTK files.
 
 darcyVelocity = DarcyVelocityLinker()
 darcyVelocity:set_permeability(permeability)

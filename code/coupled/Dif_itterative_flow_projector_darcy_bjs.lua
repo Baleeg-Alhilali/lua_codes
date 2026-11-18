@@ -218,21 +218,21 @@ util.solver.defaults.approxSpace = approxSpace
 -- level-0 coarse problem, where scalar ILU fails on the velocity-pressure
 -- saddle-point matrix.
 solverDesc = {
-    type = "newton",
+    type = "newton", -- alternative for Stokes-only runs: a linear solver
 
     convCheck = {
         type = "standard",
         iterations = 100,
-        absolute = 1e-15,
+        absolute = 1e-14,
         reduction = 1e-10,
         verbose = true
     },
 
     linSolver = {
-        type = "bicgstab",
+        type = "bicgstab", -- alternative: "gmres"
 
         precond = {
-            type = "gmg",
+            type = "gmg", -- alternative: "ilu" for a single-level solve
             smoother = {
                 type = "gs", -- "jac",
                 overlap = true,
@@ -242,16 +242,16 @@ solverDesc = {
             preSmooth = 4, -- 3,
             postSmooth = 4, -- 3,
             rap = true, -- false,
-            baseLevel = numPreRefs,
+            baseLevel = 0,
 
-            baseSolver = "superlu",
+            baseSolver = "superlu", -- alternative: iterative coarse solver
             gatheredBaseSolverIfAmbiguous = true
         },
 
         convCheck = {
             type = "standard",
             iterations = 100,
-            absolute = 1e-16,
+            absolute = 1e-14,
             reduction = 0.5e-10, -- 1e-6,
             verbose = true
         }

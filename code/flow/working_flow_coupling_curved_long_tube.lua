@@ -1,4 +1,13 @@
--- Resolve every relative input and output path from the Model directory.
+--------------------------------------------------------------------------------
+-- Model summary
+--------------------------------------------------------------------------------
+-- Legacy partitioned curved-tube Stokes--Darcy--BJS model with sequential
+-- BiCGStab/GMG solves and Robin-reduced porous coupling.
+
+--------------------------------------------------------------------------------
+-- Dependencies
+--------------------------------------------------------------------------------
+-- Resolves paths and loads UG4 flow, diffusion, projector, and balancing tools.
 local __model_script = debug.getinfo(1, "S").source
 if __model_script:sub(1, 1) == "@" then __model_script = __model_script:sub(2) end
 if __model_script:sub(1, 1) ~= "/" then
@@ -11,23 +20,22 @@ ChangeDirectory(MODEL_ROOT)
 ug_load_script("ug_util.lua")
 ug_load_script("util/load_balancing_util.lua")
 
--- Standalone curved-tube Robin-reduced Stokes--Darcy--BJS model with
--- all-iterative BiCGStab/GMG subsolvers. No other application script is loaded.
 AssertPluginsLoaded({"NavierStokes", "ConvectionDiffusion"})
 
 total_start_time = GetClockS()
 
 --------------------------------------------------------------------------------
--- User configuration
+-- Parameters
 --------------------------------------------------------------------------------
+-- Only -numRefs and -output are terminal inputs. Mesh, physical coefficients,
+-- boundary data, and solver controls are set here.
 
 dim = 3
 
--- These are the only command-line parameters accepted by this script.
-numRefs = util.GetParamNumber("-numRefs", 2, "number of uniform refinements")
-bstokes = util.GetParamBool("-bstokes", true,
-    "true: Stokes flow; false: Navier--Stokes flow")
-vmax = util.GetParamNumber("-vmax", 3.0, "maximum inlet velocity [mm/s]")
+-- Only -numRefs and -output are command-line inputs.
+numRefs = util.GetParamNumber("-numRefs", 1, "number of uniform refinements")
+bstokes = true
+vmax = 3.0                         -- [mm/s]
 
 -- Geometry and physical parameters: edit values here, not on the command line.
 gridS = "curved_tube"
@@ -43,41 +51,22 @@ bjsAlpha = 0.2                    -- dimensionless BJS coefficient
 density = 1000.0                  -- [kg/m^3]
 outerPressurePa = 0.0             -- pressure at OuterWall [Pa]
 
--- Solver parameters: edit values here, not on the command line.
-linearTolerance = 1.0e-10
-linearReduction = 1.0e-8
-linearMaxIters = 1000
-newtonTolerance = 1.0e-10
-newtonReduction = 1.0e-8
-newtonMaxIters = 30
-coarseTolerance = 1.0e-12
-coarseReduction = 1.0e-10
-coarseMaxIters = 500
-ilutThreshold = 1.0e-12
-coarseILUTInversionEps = 1.0e-20
-gmgBaseLevel = 0
-gmgCycle = "V"
-gmgPreSmooth = 4
-gmgPostSmooth = 4
-gmgUseRAP = false
-
 -- Porous-layer impedance parameter.
 porousResistanceLength = 3.0e-2 -- [mm], approximate porous-layer thickness
 
 -- MPI runs create .pvtu master files and one .vtu file per rank.
 local flowModelTag = bstokes and "stokes" or "navier_stokes"
-vtk_file_name = "Results/" .. gridS .. "_" .. flowModelTag
-    .. "_darcy_bjs_robin_gmg_ref" .. numRefs
+vtk_file_name = util.GetParam(
+    "-output",
+    "Results_final/" .. gridS .. "_" .. flowModelTag
+        .. "_darcy_bjs_robin_gmg_ref" .. numRefs,
+    "VTK output prefix")
 
 assert(numRefs >= 0, "numRefs must be non-negative")
 assert(vmax >= 0.0, "vmax must be non-negative")
 assert(permeabilityM2 > 0.0, "permeabilityM2 must be positive")
 assert(bjsAlpha > 0.0, "bjsAlpha must be positive")
 assert(density > 0.0, "density must be positive")
-assert(linearTolerance > 0.0 and linearReduction > 0.0,
-    "linear convergence tolerances must be positive")
-assert(linearMaxIters > 0 and coarseMaxIters > 0,
-    "solver iteration limits must be positive")
 assert(porousResistanceLength > 0.0,
     "porousResistanceLength must be positive")
 
@@ -89,8 +78,10 @@ print(string.format(
 ))
 
 --------------------------------------------------------------------------------
--- Domain
+-- Mesh and approximation space
 --------------------------------------------------------------------------------
+-- Loads the projected curved tube, refines it with its stored projector, and
+-- constructs the separate lumen and porous approximation spaces.
 
 local function file_contains(path, needle)
     local file = assert(io.open(path, "r"), "Cannot open grid file: " .. path)
@@ -143,13 +134,13 @@ print("Domain info:")
 print(dom:domain_info():to_string())
 
 --------------------------------------------------------------------------------
--- Separate approximation spaces for a stable partitioned interface solve
+-- Separate Stokes and Darcy approximation spaces
 --------------------------------------------------------------------------------
 
 stokesSpace = ApproximationSpace(dom)
 stokesSpace:add_fct(
     {"u", "v", "w", "pressure"}, "Lagrange", 1,
-    {"Lumen", "Inlet", "Outlet", "Apical", "TripleJunction"}
+    {"Lumen", "Inlet", "Outlet", "Apical", "MembraneWall"}
 )
 stokesSpace:init_levels()
 stokesSpace:init_top_surface()
@@ -157,7 +148,7 @@ stokesSpace:init_top_surface()
 darcySpace = ApproximationSpace(dom)
 darcySpace:add_fct(
     "darcyPressure", "Lagrange", 1,
-    "Membrane,Inter,Apical,Basolateral,OuterWall,MembraneWall,Inlet,Outlet,TripleJunction"
+    "Membrane,Inter,Apical,Basolateral,OuterWall,MembraneWall,Inlet,Outlet"
 )
 darcySpace:init_levels()
 darcySpace:init_top_surface()
@@ -168,8 +159,10 @@ print("Darcy approximation space:")
 darcySpace:print_statistic()
 
 --------------------------------------------------------------------------------
--- Physical coefficients and boundary data
+-- Discretization and boundary conditions
 --------------------------------------------------------------------------------
+-- Defines centerline-aware boundary callbacks first and assembles the legacy
+-- partitioned Stokes and Darcy subproblems.
 
 local permeability = permeabilityM2 * 1.0e6 -- [mm^2]
 local darcyMobility = permeability / viscosity
@@ -196,7 +189,7 @@ function inletVelocity(x, y, z, t)
 end
 
 --------------------------------------------------------------------------------
--- One-way interface data: Stokes normal velocity drives Darcy flux.
+-- Boundary-data functions and one-way interface transfer
 --------------------------------------------------------------------------------
 
 stokesState = GridFunction(stokesSpace)
@@ -211,7 +204,7 @@ function laggedStokesNormalFlux(x, y, z, t, si)
 end
 
 --------------------------------------------------------------------------------
--- Stokes/Navier--Stokes problem in Lumen
+-- Stokes/Navier--Stokes equation in Lumen
 --------------------------------------------------------------------------------
 
 stokesEq = NavierStokesFV1({"u", "v", "w", "pressure"}, {"Lumen"})
@@ -236,11 +229,11 @@ stokesBJS:set_sliding_factor(bjsFriction)
 stokesBJS:set_sliding_limit(0.0)
 stokesBJS:set_normal_factor(normalRobinResistance)
 
--- Close the cap/wall junction explicitly. TripleJunction is an edge subset in
--- this 3D mesh; NavierStokesWall constrains its velocity DoFs so they are not
+-- Close the cap/wall junction explicitly. MembraneWall owns the terminal rim;
+-- NavierStokesWall constrains its velocity DoFs so they are not
 -- left to the competing inlet/outlet and Apical interface conditions.
-stokesTripleJunctionWall = NavierStokesWall(stokesEq)
-stokesTripleJunctionWall:add("TripleJunction")
+stokesMembraneWall = NavierStokesWall(stokesEq)
+stokesMembraneWall:add("MembraneWall")
 
 -- Reduced porous-layer condition in the interface-normal direction:
 --     (sigma_S n).n + R_D u_n = 0,
@@ -248,16 +241,16 @@ stokesTripleJunctionWall:add("TripleJunction")
 -- defect and Jacobian, unlike a prescribed Neumann callback.
 
 --------------------------------------------------------------------------------
--- Apply the normal Darcy impedance implicitly; BJS handles tangential slip.
+-- Normal Darcy impedance and tangential BJS slip
 stokesDisc = DomainDiscretization(stokesSpace)
 stokesDisc:add(stokesEq)
 stokesDisc:add(stokesInlet)
 stokesDisc:add(stokesOpenBoundary)
 stokesDisc:add(stokesBJS)
-stokesDisc:add(stokesTripleJunctionWall)
+stokesDisc:add(stokesMembraneWall)
 
 --------------------------------------------------------------------------------
--- Darcy reconstruction driven by the stabilized Stokes normal flux.
+-- Darcy equation driven by the transferred Stokes normal flux
 --------------------------------------------------------------------------------
 
 darcyMembraneEq = ConvectionDiffusionFV1("darcyPressure", "Membrane")
@@ -279,8 +272,10 @@ darcyDisc:add(darcyInterEq)
 darcyDisc:add(darcyInterfaceFlux)
 darcyDisc:add(darcyOuterPressure)
 --------------------------------------------------------------------------------
--- Sequential BiCGStab/GMG solves
+-- Solver
 --------------------------------------------------------------------------------
+-- Solves both partitions iteratively with geometric multigrid and reports all
+-- requested convergence checks.
 
 local solve_start_time = GetClockS()
 local function outerLinearSolverDescription(space, disc)
@@ -289,32 +284,33 @@ local function outerLinearSolverDescription(space, disc)
     -- coarse problem and it stagnated at numRefs=2.  Build the coarse inverse
     -- explicitly on the agglomerated matrix.  Its actual solve remains fully
     -- iterative (BiCGStab/ILUT); no LU factorization is used.
-    local iterativeCoarseSolver = util.solver.CreateLinearSolver({
-        type = "bicgstab",
+    local coarseSolverDesc = {
+        type = "bicgstab", -- alternative: "gmres"
         precond = {
-            type = "ilut",
-            threshold = ilutThreshold,
+            type = "ilut", -- alternative: "ilu"
+            threshold = 1.0e-12,
             ordering = "NativeCuthillMcKee",
-            inversionEps = coarseILUTInversionEps
+            inversionEps = 2.220446049250313e-16
         },
         convCheck = {
             type = "standard",
-            iterations = coarseMaxIters,
-            absolute = coarseTolerance,
-            reduction = coarseReduction,
+            iterations = 500,
+            absolute = 1e-14,
+            reduction = 1.0e-10,
             verbose = true
         }
-    })
+    }
+    local iterativeCoarseSolver = util.solver.CreateLinearSolver(coarseSolverDesc)
     local agglomeratedIterativeCoarseSolver =
         AgglomeratingSolver(iterativeCoarseSolver)
 
     return {
-        type = "bicgstab",
+        type = "bicgstab", -- alternative: "gmres"
         precond = {
-            type = "gmg",
+            type = "gmg", -- alternative: "ilu" for a single-level solve
             approxSpace = space,
             discretization = disc,
-            baseLevel = gmgBaseLevel,
+            baseLevel = 0,
             baseSolver = agglomeratedIterativeCoarseSolver,
             smoother = {
                 type = "ilu",
@@ -323,10 +319,10 @@ local function outerLinearSolverDescription(space, disc)
                 consistentInterfaces = true,
                 inversionEps = 1.0e-12
             },
-            cycle = gmgCycle,
-            preSmooth = gmgPreSmooth,
-            postSmooth = gmgPostSmooth,
-            rap = gmgUseRAP,
+            cycle = "V", -- alternative: "W"
+            preSmooth = 4,
+            postSmooth = 4,
+            rap = false,
             gatheredBaseSolverIfAmbiguous = true,
             transfer = {
                 type = "std",
@@ -337,9 +333,9 @@ local function outerLinearSolverDescription(space, disc)
         },
         convCheck = {
             type = "standard",
-            iterations = linearMaxIters,
-            absolute = linearTolerance,
-            reduction = linearReduction,
+            iterations = 1000,
+            absolute = 1e-10,
+            reduction = 1.0e-8,
             verbose = true
         }
     }
@@ -390,8 +386,14 @@ VecScaleAdd2(darcyState, 1.0, solvedDarcy, 0.0, darcyState)
 darcyState:set_consistent_storage_type()
 
 --------------------------------------------------------------------------------
--- Darcy velocity and VTK output
+-- Time discretization and initial values
 --------------------------------------------------------------------------------
+-- Steady model: no time discretization; both partitioned states start at zero.
+
+--------------------------------------------------------------------------------
+-- Output
+--------------------------------------------------------------------------------
+-- Writes separate lumen and porous velocity/pressure results and flux checks.
 
 darcyVelocity = DarcyVelocityLinker()
 darcyVelocity:set_permeability(permeability)

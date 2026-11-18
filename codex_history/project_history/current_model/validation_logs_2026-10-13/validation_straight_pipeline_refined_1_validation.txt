@@ -1,0 +1,21 @@
+mesh: /tmp/validation_straight_pipeline_refined_1.ugx
+vertices: 19404
+volumes: tetrahedrons=79736, hexahedrons=2208, prisms=736, pyramids=0, octahedrons=0
+faces: triangles=166664, constraining_triangles=0, constrained_triangles=736, quadrilaterals=7592, constraining_quadrilaterals=368, constrained_quadrilaterals=0
+minimum all-pairs edge ratio: 0.01963786 (volume 79809, hexahedrons)
+tetrahedra: inverted=0, exactly_zero=0, min_abs_signed_volume=6.3557193341e-09
+minimum normalized tetrahedron volume: 0.00632222823285 (tetrahedron 14825)
+serialized face adjacency: {1: 14848, 2: 160512}
+unmatched serialized faces: 0
+duplicate serialized face geometries: 0
+non-manifold volume faces (>2 neighbors): 0
+duplicate subset assignments: 0
+interface contract: production
+interface adjacency:
+  Apical: ('Lumen', 'Membrane')=368
+  Basolateral: ('Inter',)=736, ('Membrane',)=368
+  Inlet: ('Lumen',)=32
+  Outlet: ('Lumen',)=32
+  OuterWall: ('Inter',)=13616
+  MembraneWall: ('Membrane',)=64
+VALIDATION: PASS

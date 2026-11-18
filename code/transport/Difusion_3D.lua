@@ -33,7 +33,7 @@ dt = 0.1
 --dt = 1.0e-14      -- [s]
 
 -- upwind = "partial"
-vtk_file_name = "results/Diffusion_3D" .. endTime.. numRefs
+vtk_file_name = "Results/Diffusion_3D" .. endTime.. numRefs
 
 --------------------------------------------------------------------------------
 -- Parameters
@@ -126,7 +126,7 @@ domainDisc:add(dirichletBND)
 
 util.solver.defaults.approxSpace = approxSpace
 solverDesc = {
-	type = "newton",
+	type = "newton", -- alternative for linearized runs: a linear solver
 
 	lineSearch = {
 		type = "standard",
@@ -140,28 +140,28 @@ solverDesc = {
 	convCheck = {
 		type = "standard",
 		iterations = 30,
-		absolute = 1e-8,
+		absolute = 1e-14,
 		reduction = 1e-8,
 		verbose = true
 	},
 
 	linSolver = {
-		type = "bicgstab",
+		type = "bicgstab", -- alternative: "gmres"
 		precond = {
-			type = "gmg",
+			type = "gmg", -- alternative: "ilu" for a single-level solve
 			smoother = "ilu",
 			cycle = "V",
 			preSmooth = 2,
 			postSmooth = 2,
 			rap = false,
-			baseLevel = numPreRefs,
-			baseSolver = "lu"
+			baseLevel = 0,
+			baseSolver = "lu" -- alternative: "superlu" when available
 		},
 
 		convCheck = {
 			type = "standard",
 			iterations = 200,
-			absolute = 1e-10,
+			absolute = 1e-14,
 			reduction = 1e-6, -- 1e-6,
 			verbose = true
 		}

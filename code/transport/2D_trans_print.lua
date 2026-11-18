@@ -24,7 +24,7 @@ gridName = "ProMeshFiles/runs/" .. gridS .. ".ugx"
 
 numRefs = util.GetParamNumber("-numRefs", 4)
 numPreRefs = util.GetParamNumber("-numPreRefs", 0)
-vtk_file_name = "results/"..gridS .. numRefs
+vtk_file_name = "Results_final/"..gridS .. numRefs
 endTime = util.GetParamNumber("-endTime", 15.0) -- [s]
 dt = util.GetParamNumber("-dt", 0.1)           -- [s]
 
@@ -197,21 +197,21 @@ domainDisc:add(dirichletBND)
 util.solver.defaults.approxSpace = approxSpace
 
 solverDesc = {
-    type = "newton",
+    type = "newton", -- alternative for linearized runs: a linear solver
 
     convCheck = {
         type = "standard",
         iterations = 5,
-        absolute = 1e-8,
+        absolute = 1e-14,
         reduction = 1e-8,
         verbose = true
     },
 
     linSolver = {
-        type = "bicgstab",
+        type = "bicgstab", -- alternative: "gmres"
 
         precond = {
-            type = "gmg",
+            type = "gmg", -- alternative: "ilu" for a single-level solve
 
             smoother = {
                 type = "gs",
@@ -222,7 +222,7 @@ solverDesc = {
             preSmooth = 4,
             postSmooth = 4,
             rap = true,
-            baseLevel = numPreRefs,
+            baseLevel = 0,
 
             baseSolver = {
                 type = "bicgstab",
@@ -235,7 +235,7 @@ solverDesc = {
                 convCheck = {
                     type = "standard",
                     iterations = 200,
-                    absolute = 1e-10,
+                    absolute = 1e-14,
                     reduction = 0.5e-8,
                     verbose = false
                 }
@@ -245,7 +245,7 @@ solverDesc = {
         convCheck = {
             type = "standard",
             iterations = 100,
-            absolute = 1e-8,
+            absolute = 1e-14,
             reduction = 0.5e-8,
             verbose = true
         }
@@ -271,6 +271,57 @@ vtkMembrane:select("c_membrane", "Na")
 vtkInter = VTKOutput()
 vtkInter:select("c_inter", "Na")
 
+-- Each compartment is written as a VTU piece because its concentration field
+-- is subset-restricted. One PVTU master combines all pieces for convenient
+-- loading as a single dataset in ParaView.
+local outputTimes = {}
+local lastOutputStep = 0
+
+local function writeCombinedPVTU(step, time)
+    if ProcRank() ~= 0 then return end
+
+    local fileName = string.format("%s_t%04d.pvtu", vtk_file_name, step)
+    local file = assert(io.open(fileName, "w"),
+        "Cannot create combined PVTU file: " .. fileName)
+    local baseName = assert(vtk_file_name:match("([^/]+)$"))
+    local compartments = {"lumen", "membrane", "inter"}
+
+    file:write('<?xml version="1.0"?>\n')
+    file:write('<VTKFile type="PUnstructuredGrid" version="0.1" ',
+               'byte_order="LittleEndian">\n')
+    file:write(string.format('  <Time timestep="%.17g"/>\n', time))
+    file:write('  <PUnstructuredGrid GhostLevel="0">\n')
+    file:write('    <PPoints>\n')
+    file:write('      <PDataArray type="Float32" ',
+               'NumberOfComponents="3"/>\n')
+    file:write('    </PPoints>\n')
+    file:write('    <PPointData>\n')
+    file:write('      <PDataArray type="Float32" Name="Na" ',
+               'NumberOfComponents="1"/>\n')
+    file:write('    </PPointData>\n')
+
+    for _, compartment in ipairs(compartments) do
+        if NumProcs() == 1 then
+            file:write(string.format(
+                '    <Piece Source="%s_%s_t%04d.vtu"/>\n',
+                baseName, compartment, step))
+        else
+            for rank = 0, NumProcs() - 1 do
+                file:write(string.format(
+                    '    <Piece Source="%s_%s_p%d_t%04d.vtu"/>\n',
+                    baseName, compartment, rank, step))
+            end
+        end
+    end
+
+    file:write('  </PUnstructuredGrid>\n')
+    file:write('</VTKFile>\n')
+    file:close()
+
+    outputTimes[step] = time
+    if step > lastOutputStep then lastOutputStep = step end
+end
+
 function writeVTK(uOut, step, time)
     vtkLumen:print_subsets(
         vtk_file_name .. "_lumen",
@@ -295,6 +346,8 @@ function writeVTK(uOut, step, time)
         step,
         time
     )
+
+    writeCombinedPVTU(step, time)
 end
 
 -- Write the initialized solution at t = 0.
@@ -330,10 +383,29 @@ timeIntegrator:apply(
     0.0
 )
 
--- Create one independent time-series index for each requested subset.
-vtkLumen:write_time_pvd(vtk_file_name .. "_lumen", u)
-vtkMembrane:write_time_pvd(vtk_file_name .. "_membrane", u)
-vtkInter:write_time_pvd(vtk_file_name .. "_inter", u)
+-- Create one time-series index whose entries are the combined PVTU masters.
+if ProcRank() == 0 then
+    local pvdFileName = vtk_file_name .. ".pvd"
+    local pvd = assert(io.open(pvdFileName, "w"),
+        "Cannot create combined PVD file: " .. pvdFileName)
+    local baseName = assert(vtk_file_name:match("([^/]+)$"))
+
+    pvd:write('<?xml version="1.0"?>\n')
+    pvd:write('<VTKFile type="Collection" version="0.1" ',
+              'byte_order="LittleEndian">\n')
+    pvd:write('  <Collection>\n')
+    for step = 0, lastOutputStep do
+        if outputTimes[step] ~= nil then
+            pvd:write(string.format(
+                '    <DataSet timestep="%.17g" group="" part="0" ' ..
+                'file="%s_t%04d.pvtu"/>\n',
+                outputTimes[step], baseName, step))
+        end
+    end
+    pvd:write('  </Collection>\n')
+    pvd:write('</VTKFile>\n')
+    pvd:close()
+end
 
 solve_elapsed_time = GetClockS() - solve_start_time
 total_elapsed_time = GetClockS() - total_start_time

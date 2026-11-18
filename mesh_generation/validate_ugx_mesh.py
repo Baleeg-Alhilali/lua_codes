@@ -115,6 +115,22 @@ def subset_maps(root: ET.Element):
     return by_dim, counts, duplicates
 
 
+INDEXED_INTERFACE_ROLES = (
+    "Apical", "Basolateral", "Inlet", "Outlet", "MembraneWall"
+)
+
+
+def indexed_subset_role(name: str):
+    """Return (biological role, suffix) for single or indexed nephron subsets."""
+    for role in INDEXED_INTERFACE_ROLES:
+        if name == role:
+            return role, ""
+        prefix = role + "_"
+        if name.startswith(prefix) and name[len(prefix):].isdigit():
+            return role, name[len(role):]
+    return None, None
+
+
 def signed_tet_volume(vertices, tet):
     a, b, c, d = (vertices[i] for i in tet)
     ba = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
@@ -159,7 +175,7 @@ def prism_signed_volume(vertices, prism):
     a, b, c, d, e, f = prism
     return sum(
         signed_tet_volume(vertices, tet)
-        for tet in ((a, b, c, d), (b, c, e, d), (c, e, f, d))
+        for tet in ((a, b, c, d), (b, c, d, e), (c, d, e, f))
     )
 
 
@@ -191,6 +207,18 @@ def prism_min_scaled_jacobian(vertices, prism):
     return min(scaled_corner_jacobian(vertices, *corner) for corner in corners)
 
 
+def hexahedron_min_scaled_jacobian(vertices, hexahedron):
+    """Minimum signed normalized corner Jacobian for UG4 vertex ordering."""
+    a, b, c, d, e, f, g, h = hexahedron
+    corners = (
+        (a, b, d, e), (b, c, a, f),
+        (c, d, b, g), (d, a, c, h),
+        (e, h, f, a), (f, e, g, b),
+        (g, f, h, c), (h, g, e, d),
+    )
+    return min(scaled_corner_jacobian(vertices, *corner) for corner in corners)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mesh")
@@ -214,14 +242,19 @@ def main():
         help="fail below the minimum signed corner Jacobian of any prism",
     )
     parser.add_argument(
+        "--min-hexahedron-scaled-jacobian", type=float, default=1.0e-8,
+        help="fail below the minimum signed corner Jacobian of any hexahedron",
+    )
+    parser.add_argument(
         "--straight-lumen", nargs=3, type=float,
         metavar=("CENTER_X", "CENTER_Y", "RADIUS"),
         help=("also require every Apical vertex to lie on the specified "
               "z-aligned cylindrical lumen"),
     )
     parser.add_argument(
-        "--lumen-radius-tolerance", type=float, default=1.0e-4,
-        help="absolute radius tolerance used with --straight-lumen",
+        "--lumen-radius-tolerance", type=float, default=None,
+        help=("absolute radius tolerance used with --straight-lumen; "
+              "defaults to a scale-aware 1e-8 of the requested radius"),
     )
     args = parser.parse_args()
 
@@ -287,29 +320,48 @@ def main():
     duplicate_face_geometry = [key for key, count in face_keys_seen.items() if count != 1]
     nonmanifold = [(key, ids) for key, ids in adjacency.items() if len(ids) > 2]
 
-    expected_pairs = {
-        "Apical": {("Lumen", "Membrane")},
-        "Inlet": {("Lumen",)},
-        "Outlet": {("Lumen",)},
-        "OuterWall": {("Inter",)},
-        "MembraneWall": {("Membrane",)},
-    }
     interface_errors = {}
     if args.interface_contract == "production":
-        for name, expected in expected_pairs.items():
-            unexpected = {pair: count for pair, count in subset_pairs[name].items() if pair not in expected}
+        observed_roles = set()
+        for name, pairs in subset_pairs.items():
+            role, suffix = indexed_subset_role(name)
+            if role is None:
+                continue
+            observed_roles.add((role, suffix))
+            lumen = "Lumen" + suffix
+            membrane = "Membrane" + suffix
+            if role == "Apical":
+                expected = {(lumen, membrane)}
+            elif role in ("Inlet", "Outlet"):
+                expected = {(lumen,)}
+            elif role == "MembraneWall":
+                expected = {(membrane,)}
+            else:
+                historical = {("Inter",), (membrane,)}
+                conforming = {("Inter", membrane)}
+                observed = set(pairs)
+                if not observed or not (
+                    observed <= historical or observed == conforming
+                ):
+                    interface_errors[name] = dict(pairs)
+                continue
+            unexpected = {pair: count for pair, count in pairs.items()
+                          if pair not in expected}
             if unexpected:
                 interface_errors[name] = unexpected
-        basolateral_observed = set(subset_pairs["Basolateral"])
-        historical_basolateral = {("Inter",), ("Membrane",)}
-        conforming_basolateral = {("Inter", "Membrane")}
-        if not basolateral_observed or not (
-            basolateral_observed <= historical_basolateral
-            or basolateral_observed == conforming_basolateral
-        ):
-            interface_errors["Basolateral"] = dict(
-                subset_pairs["Basolateral"]
-            )
+
+        outer_unexpected = {
+            pair: count for pair, count in subset_pairs["OuterWall"].items()
+            if pair != ("Inter",)
+        }
+        if outer_unexpected:
+            interface_errors["OuterWall"] = outer_unexpected
+
+        suffixes = {suffix for role, suffix in observed_roles if role == "Apical"}
+        for suffix in suffixes:
+            for role in INDEXED_INTERFACE_ROLES:
+                if (role, suffix) not in observed_roles:
+                    interface_errors[role + suffix] = {("<missing>",): 0}
 
     tets = records(root, "tetrahedrons", 4)
     negative = []
@@ -328,25 +380,52 @@ def main():
         if normalized < min_normalized[0]:
             min_normalized = (normalized, tet_id)
 
+    hexahedra = records(root, "hexahedrons", 8)
+    inverted_hexahedra = []
+    zero_hexahedra = []
+    min_hexahedron_jacobian = (float("inf"), -1)
+    hexahedron_volume_offset = volume_counts["tetrahedrons"]
+    for hexahedron_id, hexahedron in enumerate(hexahedra):
+        jacobian = hexahedron_min_scaled_jacobian(vertices, hexahedron)
+        if jacobian < 0.0:
+            inverted_hexahedra.append((
+                hexahedron_id, jacobian,
+                volume_subset.get(hexahedron_volume_offset + hexahedron_id),
+                center(vertices, hexahedron),
+            ))
+        elif jacobian == 0.0:
+            zero_hexahedra.append(hexahedron_id)
+        if jacobian < min_hexahedron_jacobian[0]:
+            min_hexahedron_jacobian = (jacobian, hexahedron_id)
+
     prisms = records(root, "prisms", 6)
-    negative_prisms = []
+    negative_prism_decompositions = []
+    inverted_prisms = []
     zero_prisms = []
     min_prism_volume = (float("inf"), -1, 0.0)
     min_prism_jacobian = (float("inf"), -1)
-    prism_volume_offset = volume_counts["tetrahedrons"]
+    prism_volume_offset = (
+        volume_counts["tetrahedrons"] + volume_counts["hexahedrons"]
+    )
     for prism_id, prism in enumerate(prisms):
         value = prism_signed_volume(vertices, prism)
         if abs(value) < min_prism_volume[0]:
             min_prism_volume = (abs(value), prism_id, value)
         if value < 0.0:
-            negative_prisms.append((
+            negative_prism_decompositions.append((
                 prism_id, value,
                 volume_subset.get(prism_volume_offset + prism_id),
                 center(vertices, prism),
             ))
-        elif value == 0.0:
-            zero_prisms.append(prism_id)
         jacobian = prism_min_scaled_jacobian(vertices, prism)
+        if jacobian < 0.0:
+            inverted_prisms.append((
+                prism_id, jacobian,
+                volume_subset.get(prism_volume_offset + prism_id),
+                center(vertices, prism),
+            ))
+        elif jacobian == 0.0:
+            zero_prisms.append(prism_id)
         if jacobian < min_prism_jacobian[0]:
             min_prism_jacobian = (jacobian, prism_id)
 
@@ -358,9 +437,16 @@ def main():
     print(f"tetrahedra: inverted={len(negative)}, exactly_zero={len(zero)}, min_abs_signed_volume={min_abs[0]:.12g}")
     print(f"minimum normalized tetrahedron volume: {min_normalized[0]:.12g} (tetrahedron {min_normalized[1]})")
     print(
+        "hexahedra: "
+        f"inverted={len(inverted_hexahedra)}, exactly_zero={len(zero_hexahedra)}, "
+        f"min_scaled_jacobian={min_hexahedron_jacobian[0]:.12g} "
+        f"(hexahedron {min_hexahedron_jacobian[1]})"
+    )
+    print(
         "prisms: "
-        f"inverted={len(negative_prisms)}, exactly_zero={len(zero_prisms)}, "
-        f"min_abs_signed_volume={min_prism_volume[0]:.12g}, "
+        f"inverted={len(inverted_prisms)}, exactly_zero={len(zero_prisms)}, "
+        f"negative_polyhedral_decompositions={len(negative_prism_decompositions)}, "
+        f"min_abs_polyhedral_volume={min_prism_volume[0]:.12g}, "
         f"min_scaled_jacobian={min_prism_jacobian[0]:.12g} "
         f"(prism {min_prism_jacobian[1]})"
     )
@@ -371,7 +457,11 @@ def main():
     print(f"duplicate subset assignments: {len(duplicate_assignments)}")
     print(f"interface contract: {args.interface_contract}")
     print("interface adjacency:")
-    for name in ("Apical", "Basolateral", "Inlet", "Outlet", "OuterWall", "MembraneWall"):
+    interface_names = sorted(
+        name for name in subset_pairs
+        if indexed_subset_role(name)[0] is not None
+    ) + ["OuterWall"]
+    for name in interface_names:
         pairs = ", ".join(f"{pair}={count}" for pair, count in subset_pairs[name].items())
         print(f"  {name}: {pairs or '<none>'}")
 
@@ -390,16 +480,22 @@ def main():
             for i in apical_vertex_ids
         ]
         max_radial_error = max(radial_errors, default=float("inf"))
+        lumen_radius_tolerance = (
+            args.lumen_radius_tolerance
+            if args.lumen_radius_tolerance is not None
+            else max(abs(expected_radius) * 1.0e-8,
+                     math.ulp(max(abs(expected_radius), 1.0)) * 128.0)
+        )
         lumen_geometry_error = (
             not apical_vertex_ids or
-            max_radial_error > args.lumen_radius_tolerance
+            max_radial_error > lumen_radius_tolerance
         )
         print(
             "straight-lumen conformance: "
             f"Apical_vertices={len(apical_vertex_ids)}, "
             f"expected_radius={expected_radius:.12g}, "
             f"max_abs_radius_error={max_radial_error:.12g}, "
-            f"tolerance={args.lumen_radius_tolerance:.12g}"
+            f"tolerance={lumen_radius_tolerance:.12g}"
         )
 
     if args.details and negative:
@@ -407,9 +503,20 @@ def main():
         for item in negative:
             print(f"  {item[0]} {item[1]:.12e} {item[2]} {item[3]}")
 
+    if args.details and inverted_hexahedra:
+        print("inverted hexahedra (local_id, scaled_jacobian, subset, center):")
+        for item in inverted_hexahedra:
+            print(f"  {item[0]} {item[1]:.12e} {item[2]} {item[3]}")
+
+    if args.details and inverted_prisms:
+        print("inverted prisms (local_id, scaled_jacobian, subset, center):")
+        for item in inverted_prisms:
+            print(f"  {item[0]} {item[1]:.12e} {item[2]} {item[3]}")
+
     failures = (
         len(invalid_indices) + len(negative) + len(zero) +
-        len(negative_prisms) + len(zero_prisms) +
+        len(inverted_hexahedra) + len(zero_hexahedra) +
+        len(inverted_prisms) + len(zero_prisms) +
         len(missing_face_geometry) + len(duplicate_face_geometry) +
         len(nonmanifold) + len(duplicate_assignments) + len(interface_errors) +
         int(lumen_geometry_error)
@@ -426,6 +533,11 @@ def main():
         print("prism scaled-Jacobian quality gate failed: "
               f"{min_prism_jacobian[0]:.12g} < "
               f"{args.min_prism_scaled_jacobian:.12g}")
+    if min_hexahedron_jacobian[0] < args.min_hexahedron_scaled_jacobian:
+        failures += 1
+        print("hexahedron scaled-Jacobian quality gate failed: "
+              f"{min_hexahedron_jacobian[0]:.12g} < "
+              f"{args.min_hexahedron_scaled_jacobian:.12g}")
     if failures:
         print("VALIDATION: FAIL")
         if interface_errors:

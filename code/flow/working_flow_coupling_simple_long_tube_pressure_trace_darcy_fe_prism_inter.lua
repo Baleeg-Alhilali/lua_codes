@@ -49,14 +49,31 @@ bstokes = true                      -- true: Stokes; false: Navier--Stokes
 vmax = 3.0                          -- maximum inlet velocity [mm/s]
 
 -- Geometry and physical parameters: edit values here, not on the command line.
-gridS = "straight_nephron_prism_inter"
+gridS = util.GetParam(
+    "-grid", "straight_nephron_prism_inter", "UGX stem below runs/"
+)
 gridName = "runs/" .. gridS .. ".ugx"
 numPreRefs = 0
--- Mesh-validated straight lumen: z in [-0.42, 0.42] mm, centered at the
--- origin, with the Apical wall at r = 0.015 mm.
-inletRadius = 1.5e-2               -- [mm]
-inletCenterX = 0.0                 -- [mm]
-inletCenterY = 0.0                 -- [mm]
+-- Set this to the mesh-validated Apical radius.  The original prism control
+-- uses 0.015 mm; the generalized straight-nephron control uses 0.010 mm.
+inletRadius = util.GetParamNumber(
+    "-inletRadius", 1.5e-2, "mesh lumen radius [mm]"
+)
+inletCenterX = util.GetParamNumber("-inletCenterX", 0.0, "inlet center x [mm]")
+inletCenterY = util.GetParamNumber("-inletCenterY", 0.0, "inlet center y [mm]")
+inletCenterZ = util.GetParamNumber("-inletCenterZ", 0.0, "inlet center z [mm]")
+inletDirectionX = util.GetParamNumber("-inletDirectionX", 0.0, "inlet direction x")
+inletDirectionY = util.GetParamNumber("-inletDirectionY", 0.0, "inlet direction y")
+inletDirectionZ = util.GetParamNumber("-inletDirectionZ", 1.0, "inlet direction z")
+local inletDirectionNorm = math.sqrt(
+    inletDirectionX * inletDirectionX
+    + inletDirectionY * inletDirectionY
+    + inletDirectionZ * inletDirectionZ
+)
+assert(inletDirectionNorm > 0.0, "inlet direction must be non-zero")
+inletDirectionX = inletDirectionX / inletDirectionNorm
+inletDirectionY = inletDirectionY / inletDirectionNorm
+inletDirectionZ = inletDirectionZ / inletDirectionNorm
 viscosity = 1.0                   -- kinematic viscosity [mm^2/s]
 membranePermeabilityM2 = util.GetParamNumber(
     "-KmemM2", 1.0e-15, "membrane Darcy permeability [m^2]"
@@ -85,11 +102,31 @@ normalVelocityStabilization = util.GetParamNumber(
     "-normalImpedance", 1.0e3, "Apical numerical normal impedance"
 )
 solverSetup = "gmg"
-outerKrylovType = "bicgstab"      -- GMRES produced NaNs with this preconditioner
+solverProfile = util.GetParam(
+    "-solverProfile", "serial_reference",
+    "solver profile: serial_reference"
+)
+outerKrylovType = "bicgstab"
 gmgSmootherType = "uzawa"          -- Stokes pressure is the saddle component
-gmgUseRAP = true                  -- preserve the constrained operator by Galerkin products
+gmgMainSmootherType = util.GetParam(
+    "-mainSmoother", "line", "GMG smoother: line, ilu, or element"
+)
+gmgUseRAP = util.GetParamNumber(
+    "-gmgRAP", 1, "use Galerkin RAP level operators (1) or rediscretization (0)"
+) ~= 0
+gmgPreSmooth = math.floor(util.GetParamNumber(
+    "-gmgPreSmooth", 2, "number of GMG pre-smoothing sweeps"
+))
+gmgPostSmooth = math.floor(util.GetParamNumber(
+    "-gmgPostSmooth", 2, "number of GMG post-smoothing sweeps"
+))
 interfaceTractionSign = 1.0
-maxKrylovCycles = 8
+krylovIterations = math.floor(util.GetParamNumber(
+    "-krylovIterations", 400, "maximum iterations in each Krylov cycle"
+))
+maxKrylovCycles = math.floor(util.GetParamNumber(
+    "-maxKrylovCycles", 8, "maximum restarted true-defect cycles"
+))
 krylovCycleReduction = 1.0e-4    -- per-cycle algebraic reduction target
 gmgBaseLevel = 0                  -- retain the loaded coarse mesh as the GMG base
 darcyDiscretization = util.GetParam(
@@ -118,11 +155,18 @@ assert(bjsAlpha > 0.0, "bjsAlpha must be positive")
 assert(density > 0.0, "density must be positive")
 assert(normalVelocityStabilization >= 0.0,
     "normalVelocityStabilization must be non-negative")
+assert(krylovIterations >= 1, "krylovIterations must be positive")
+assert(maxKrylovCycles >= 1, "maxKrylovCycles must be positive")
+assert(solverProfile == "serial_reference", "unknown solverProfile")
 assert(darcyDiscretization == "fe" or darcyDiscretization == "fv1",
     "darcyDisc must be 'fe' or 'fv1'")
+assert(gmgMainSmootherType == "line" or gmgMainSmootherType == "ilu"
+    or gmgMainSmootherType == "element",
+    "mainSmoother must be 'line', 'ilu', or 'element'")
 
 InitUG(dim, AlgebraType("CPU", 1))
 print("MPI processes: " .. NumProcs())
+print("Solver profile: " .. solverProfile)
 print(string.format(
     "Model: %s, vmax=%.6e mm/s, refinements=%d",
     bstokes and "Stokes" or "Navier--Stokes", vmax, numRefs
@@ -168,7 +212,12 @@ assert(util.CheckSubsets(dom,
 -- either MPI_ERR_TRUNCATE at level 0 or NaNs when distribution starts on an
 -- intermediate level.  Refine with the serialized projector first, then
 -- distribute the completed hierarchy at its finest level.
-balancer.firstDistLvl = numRefs
+balancer.firstDistLvl = util.GetParamNumber(
+    "-firstDistLvl", numRefs,
+    "first distributed refinement level (0 is scalable for conforming meshes)"
+)
+assert(balancer.firstDistLvl >= 0 and balancer.firstDistLvl <= numRefs,
+    "firstDistLvl must lie between 0 and numRefs")
 -- Keep all load-balancing choices in this script; do not expose UG4's
 -- additional balancing command-line parameters.
 balancer.parametersParsed = true
@@ -208,7 +257,11 @@ approxSpace:init_levels()
 approxSpace:init_top_surface()
 
 print("Monolithic Stokes--Darcy approximation space:")
-approxSpace:print_statistic()
+if numRefs < 2 then
+    approxSpace:print_statistic()
+else
+    print("  (full DoF table suppressed at r2 to avoid a memory-intensive diagnostic traversal)")
+end
 
 --------------------------------------------------------------------------------
 -- Discretization and boundary conditions
@@ -241,15 +294,25 @@ print(string.format(
 ))
 
 function inletVelocity(x, y, z, t)
-    local dx, dy = x - inletCenterX, y - inletCenterY
-    local radiusSquared = dx * dx + dy * dy
+    local dx = x - inletCenterX
+    local dy = y - inletCenterY
+    local dz = z - inletCenterZ
+    local axialOffset = dx * inletDirectionX
+        + dy * inletDirectionY + dz * inletDirectionZ
+    local radialX = dx - axialOffset * inletDirectionX
+    local radialY = dy - axialOffset * inletDirectionY
+    local radialZ = dz - axialOffset * inletDirectionZ
+    local radiusSquared = radialX * radialX + radialY * radialY
+        + radialZ * radialZ
     local profile = math.max(
         0.0, 1.0 - radiusSquared / (inletRadius * inletRadius)
     )
     if radiusSquared >= inletRadius * inletRadius * (1.0 - 1.0e-6) then
         profile = 0.0
     end
-    return 0.0, 0.0, vmax * profile
+    return vmax * profile * inletDirectionX,
+        vmax * profile * inletDirectionY,
+        vmax * profile * inletDirectionZ
 end
 
 -- Stokes/Navier--Stokes equation in Lumen
@@ -385,14 +448,55 @@ local solve_start_time = GetClockS()
 local function outerLinearSolverDescription(space, disc)
     assert(solverSetup == "gmg", "Unknown solverSetup: " .. solverSetup)
 
+    -- Preserve this validated one-rank Uzawa/line configuration as the serial
+    -- numerical reference. Rejected MPI experiments are documented separately
+    -- and are deliberately not selectable as production solver profiles.
+
     -- Only p_stokes is a saddle-point component. Darcy pressure remains in the
     -- main elliptic block together with velocity and the constrained trace.
     assert(gmgSmootherType == "uzawa",
         "Unknown gmgSmootherType: " .. tostring(gmgSmootherType))
     -- Line smoothing is needed for the strongly anisotropic Darcy modes on
     -- the refined straight-tube hierarchy. Point ILU stagnates at r2.
-    local gmgMainInverse = LineGaussSeidel(space)
-    gmgMainInverse:set_num_steps(1, 1, 1, 1, 1, 1)
+    if gmgMainSmootherType == "element" then
+        return {
+            type = outerKrylovType,
+            precond = {
+                type = "gmg",
+                approxSpace = space,
+                discretization = disc,
+                baseLevel = gmgBaseLevel,
+                baseSolver = "superlu",
+                smoother = ElementGaussSeidel(1.0, "element"),
+                cycle = "V",
+                preSmooth = gmgPreSmooth,
+                postSmooth = gmgPostSmooth,
+                rap = gmgUseRAP,
+                gatheredBaseSolverIfAmbiguous = true,
+                transfer = {
+                    type = "std",
+                    restrictionDamp = 1.0,
+                    prolongationDamp = 1.0,
+                    enableP1LagrangeOptimization = true
+                }
+            },
+            convCheck = {
+                type = "standard", iterations = krylovIterations,
+                absolute = 1e-14,
+                reduction = krylovCycleReduction, verbose = true
+            }
+        }
+    end
+
+    local gmgMainInverse
+    if gmgMainSmootherType == "line" then
+        gmgMainInverse = LineGaussSeidel(space)
+        gmgMainInverse:set_num_steps(1, 1, 1, 1, 1, 1)
+    else
+        gmgMainInverse = ILU()
+        gmgMainInverse:set_damp(1.0)
+        gmgMainInverse:set_inversion_eps(1.0e-30)
+    end
     local gmgPressureInverse = ILU()
     gmgPressureInverse:set_damp(1.0)
     gmgPressureInverse:set_inversion_eps(1.0e-30)
@@ -410,6 +514,8 @@ local function outerLinearSolverDescription(space, disc)
     local gmgSchurMassOp = AssembledLinearOperator(gmgSchurMassDisc)
     gmgSmoother:set_schur_operator_update(gmgSchurMassOp, 1.0 / viscosity)
 
+    local gmgBaseSolver = "superlu"
+
     return {
         type = outerKrylovType,
         precond = {
@@ -420,11 +526,11 @@ local function outerLinearSolverDescription(space, disc)
             -- The outer/full-grid solve is iterative. SuperLU is restricted
             -- to the small level-0 saddle-point problem, where pivoting is
             -- needed for a reliable GMG coarse correction.
-            baseSolver = "superlu",
+            baseSolver = gmgBaseSolver,
             smoother = gmgSmoother,
             cycle = "V",
-            preSmooth = 2,
-            postSmooth = 2,
+            preSmooth = gmgPreSmooth,
+            postSmooth = gmgPostSmooth,
             rap = gmgUseRAP,
             gatheredBaseSolverIfAmbiguous = true,
             transfer = {
@@ -436,7 +542,7 @@ local function outerLinearSolverDescription(space, disc)
         },
         convCheck = {
             type = "standard",
-            iterations = 400,
+            iterations = krylovIterations,
             absolute = 1e-14,
             reduction = krylovCycleReduction,
             verbose = true
@@ -444,40 +550,70 @@ local function outerLinearSolverDescription(space, disc)
     }
 end
 
-local function solveLinearSubproblem(space, disc, label)
+local function solveLinearSubproblem(
+    space, disc, label, level, initialState, verifiedReductionOverride
+)
     util.solver.defaults.approxSpace = space
     local matrix = AssembledLinearOperator(disc)
-    local rhs = GridFunction(space)
-    local solution = GridFunction(space)
-    solution:set(0.0)
-    disc:adjust_solution(solution)
-    disc:assemble_linear(matrix, rhs)
+    local solution = level and GridFunction(space, level) or GridFunction(space)
+    local rhs = solution:clone()
+    if initialState then
+        Prolongate(solution, initialState)
+        print("Prolongated nested initial state to level " .. level)
+    else
+        solution:set(0.0)
+    end
     local componentNames = {
         "u", "v", "w", "p_stokes", "p_darcy_scaled"
     }
+    local function componentNorms(vec)
+        local norms = {}
+        for selected = 1, #componentNames do
+            local factors = {0.0, 0.0, 0.0, 0.0, 0.0}
+            factors[selected] = 1.0
+            local component = vec:clone()
+            ScaleGF(component, vec, factors)
+            norms[selected] = VecNorm(component)
+        end
+        return norms
+    end
+    disc:adjust_solution(solution)
+    solution:set_consistent_storage_type()
+    local adjustedSolutionNorms = componentNorms(solution)
+    for component = 1, #componentNames do
+        assert(adjustedSolutionNorms[component]
+                == adjustedSolutionNorms[component],
+            label .. " produced a NaN adjusted solution in "
+                .. componentNames[component])
+    end
+    disc:assemble_linear(matrix, rhs)
+    local rhsNorms = componentNorms(rhs)
+    for component = 1, #componentNames do
+        assert(rhsNorms[component] == rhsNorms[component],
+            label .. " assembled a NaN RHS in " .. componentNames[component])
+    end
     local function trueComponentDefects()
         solution:set_consistent_storage_type()
         local defect = rhs:clone()
         VecAssign(defect, rhs)
         matrix:apply_sub(defect, solution)
-        local norms = {}
-        for selected = 1, #componentNames do
-            local factors = {0.0, 0.0, 0.0, 0.0, 0.0}
-            factors[selected] = 1.0
-            local componentDefect = defect:clone()
-            ScaleGF(componentDefect, defect, factors)
-            norms[selected] = VecNorm(componentDefect)
-        end
-        return norms
+        return componentNorms(defect)
     end
     local initialDefects = trueComponentDefects()
     local initialGlobalScaleSquared = 0.0
     for component = 1, #componentNames do
+        print(string.format(
+            "INITIAL TRUE DEFECT %-8s abs=%.6e",
+            componentNames[component], initialDefects[component]
+        ))
+        assert(initialDefects[component] == initialDefects[component],
+            label .. " assembled a NaN initial defect in "
+                .. componentNames[component])
         initialGlobalScaleSquared = initialGlobalScaleSquared
             + initialDefects[component] * initialDefects[component]
     end
     local initialGlobalScale = math.sqrt(initialGlobalScaleSquared)
-    local verifiedReduction = 1.0e-8
+    local verifiedReduction = verifiedReductionOverride or 1.0e-8
     local verifiedAbsolute = 1.0e-12
     local solverDesc = outerLinearSolverDescription(space, disc)
     local solver = util.solver.CreateLinearSolver(solverDesc)
@@ -525,9 +661,20 @@ local function solveLinearSubproblem(space, disc, label)
     return solution
 end
 
-coupledState = solveLinearSubproblem(
-    approxSpace, coupledDisc, "Monolithic Stokes--Darcy"
-)
+if numRefs >= 2 and util.HasParamOption("-nestedStart") then
+    local nestedState = solveLinearSubproblem(
+        approxSpace, coupledDisc, "Nested r" .. (numRefs - 1)
+            .. " Stokes--Darcy", numRefs - 1, nil, 1.0e-4
+    )
+    coupledState = solveLinearSubproblem(
+        approxSpace, coupledDisc, "Monolithic Stokes--Darcy",
+        numRefs, nestedState, nil
+    )
+else
+    coupledState = solveLinearSubproblem(
+        approxSpace, coupledDisc, "Monolithic Stokes--Darcy", nil, nil, nil
+    )
+end
 coupledState:set_consistent_storage_type()
 
 --------------------------------------------------------------------------------

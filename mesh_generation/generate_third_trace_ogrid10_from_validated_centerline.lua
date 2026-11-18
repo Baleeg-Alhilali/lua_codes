@@ -13,7 +13,7 @@ local output = modelRoot
     .. "/runs/ogrid10_2026-11-03/third_trace_ogrid10_projector.ugx"
 
 configure_adaptive_nephron_meshing(
-    true, 1.0, 0.02, true, 2.0, 1.5, 6.0, 6.0, false
+    true, 1.0, 0.02, true, 2.0, 1.5, 6.0, 6.0, false, 0.0
 )
 
 import_nephron_with_membrane_and_inter_from_swc(

@@ -34,7 +34,7 @@ endTime = 2.0e-3 -- [s]
 dt = 1.0e-5      -- [s]
 
 upwind = "partial"
-results_dir = "results"
+results_dir = "Results"
 vtk_file_name = results_dir .. "/2D_simple_NaClK_" .. numRefs
 
 --------------------------------------------------------------------------------
@@ -128,7 +128,7 @@ domainDisc:add(dirichletBND)
 
 util.solver.defaults.approxSpace = approxSpace
 solverDesc = {
-	type = "newton",
+	type = "newton", -- alternative for linearized runs: a linear solver
 
 	lineSearch = {
 		type = "standard",
@@ -142,28 +142,28 @@ solverDesc = {
 	convCheck = {
 		type = "standard",
 		iterations = 30,
-		absolute = 1e-20,
+		absolute = 1e-14,
 		reduction = 1e-10,
 		verbose = true
 	},
 
 	linSolver = {
-		type = "bicgstab",
+		type = "bicgstab", -- alternative: "gmres"
 		precond = {
-			type = "gmg",
+			type = "gmg", -- alternative: "ilu" for a single-level solve
 			smoother = "ilu",
 			cycle = "V",
 			preSmooth = 2,
 			postSmooth = 2,
 			rap = false,
-			baseLevel = numPreRefs,
-			baseSolver = "lu"
+			baseLevel = 1,
+			baseSolver = "lu" -- alternative: "superlu" when available
 		},
 
 		convCheck = {
 			type = "standard",
 			iterations = 100,
-			absolute = 1e-22,
+			absolute = 1e-14,
 			reduction = 1e-5,
 			verbose = true
 		}
@@ -202,4 +202,3 @@ solver:init(AssembledOperator(domainDisc))
 solver:prepare(u)
 
 timeIntegrator:apply(u, endTime, u, 0.0)
-

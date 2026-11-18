@@ -8,6 +8,13 @@
 /poisson_results/
 /ProMeshFiles/
 /Finite_elements /
+/Results_final/
+/mesh_generation/runs/
+
+# Local recovery archives and generated binary checkpoints
+/codex_history/sessions/
+/codex_history/checkpoints/
+*.mph
 
 # ParaView and other generated output formats
 *.vtu

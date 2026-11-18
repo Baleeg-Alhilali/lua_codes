@@ -1,0 +1,28 @@
+ORGANIZATION AND PATH DECISIONS
+===============================
+
+1. Folders represent technical responsibility; branches represent lifecycle.
+   Mixing unrelated projects on branches makes discovery and merging difficult,
+   so transport, flow, coupling, and mesh generation use folders on main.
+
+2. Model is the repository root.
+   Lua code depends on compact grids, SWC traces, Python mesh helpers, and notes.
+   Keeping these together makes the repository reproducible while generated
+   outputs remain excluded.
+
+3. Relative runtime paths resolve from Model.
+   Lua scripts below code/ calculate MODEL_ROOT from their own filename and call
+   ChangeDirectory(MODEL_ROOT). Moving scripts into purpose folders therefore
+   does not redirect inputs or outputs into the source tree.
+
+4. Mesh generation is separate from solver code.
+   It has different helpers, commands, inputs, and validation steps. Active
+   scripts remain directly under mesh_generation; old variants are archived.
+
+5. Large outputs are not normal Git objects.
+   Mesh refinements and ParaView outputs can be hundreds of MB or many GB.
+   They are reproducible artifacts and remain in ignored local directories.
+
+6. History is preserved before restructuring.
+   archive/pre-organization-2026-10-08 keeps the previous flat repository, and
+   temporary local archives were made before repository metadata was promoted.

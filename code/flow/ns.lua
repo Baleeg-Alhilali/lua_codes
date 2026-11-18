@@ -1,4 +1,13 @@
--- Resolve every relative input and output path from the Model directory.
+--------------------------------------------------------------------------------
+-- Model summary
+--------------------------------------------------------------------------------
+-- Solves the steady two-dimensional flow benchmark around a cylinder with a
+-- stabilized vertex-centered Navier--Stokes discretization.
+
+--------------------------------------------------------------------------------
+-- Dependencies
+--------------------------------------------------------------------------------
+-- Resolves model-relative paths and loads the UG4 flow and balancing utilities.
 local __model_script = debug.getinfo(1, "S").source
 if __model_script:sub(1, 1) == "@" then __model_script = __model_script:sub(2) end
 if __model_script:sub(1, 1) ~= "/" then
@@ -8,52 +17,42 @@ local MODEL_ROOT = assert(__model_script:match("^(.*)/code/.*$"),
     "Expected this script below Model/code: " .. __model_script)
 ChangeDirectory(MODEL_ROOT)
 
--- Navier-Stokes equation, 2d
--- Discretization: Vertex-centered, stabilized
---
--- Created for AMFS 2020
--- D. Logashenko
-
--- Load utility scripts (e.g. from from ugcore/scripts)
 ug_load_script ("ug_util.lua")
 ug_load_script ("util/load_balancing_util.lua")
+AssertPluginsLoaded({"NavierStokes"})
 
 ------------------------------------------------------------------------------------------
--- Get command line parameters
+-- Parameters
 ------------------------------------------------------------------------------------------
+-- Only -numRefs and -output are command-line inputs. Edit all physical,
+-- discretization, mesh, and solver parameters in this block.
 
 -- Physical parameters
-viscosity 	= util.GetParamNumber("-visc", 1e-3, "kinematic viscosity")
-inflow		= util.GetParamNumber("-inflow", 0.5, "max. inflow velocity")
-bStokes 	= util.HasParamOption("-Stokes", "If defined, only Stokes Eq. computed")
+viscosity 	= 1e-3
+inflow		= 0.5
+bStokes 	= false
 
 -- Numerical parameters of the discretization
 numRefs 	= util.GetParamNumber("-numRefs", 2, "number of grid refinements")
-numPreRefs 	= util.GetParamNumber("-numPreRefs", 0, "number of prerefinements (parallel)")
-bNoLaplace 	= util.HasParamOption("-noLaplace", "If defined, only laplace term used")
-bExactJac 	= util.HasParamOption("-exactJac", "If defined, exact jacobian used")
-bPecletBlend= util.HasParamOption("-PecletBlend", "If defined, Peclet Blend used")
-upwind      = util.GetParam("-upwind", "lps", "Upwind type (no, full, weighted, lps, pos, reg)")
-bPac        = util.HasParamOption("-pac", "If defined, pac upwind used")
-stab        = util.GetParam("-stab", "fields", "Stabilization type (fields or flow)")
-diffLength  = util.GetParam("-difflength", "cor", "Diffusion length type (raw, fivepoint or cor)")
+numPreRefs 	= 0
+bNoLaplace 	= false
+bExactJac 	= false
+bPecletBlend= false
+upwind      = "lps"
+bPac        = false
+stab        = "fields"
+diffLength  = "cor"
+outputFileName = util.GetParam(
+	"-output", "Results/Flow-lev" .. numRefs,
+	"VTK output prefix")
 
 -- Parameters of the solver
-ilu_beta	= util.GetParamNumber("-iluBeta", -0.2, "choose a negative value depending on the convection rate")
-------------------------------------------------------------------------------------------
--- Geometry data
-------------------------------------------------------------------------------------------
-
 dim 		= 2
 gridName = "cylinderp.ugx"
 inflow_y_0	= 0 -- y coord. of the lower corner of the inflow
 inflow_y_1	= 0.41 -- y coord. of the upper corner of the inflow
 
 -- Grid file name
-
-------------------------------------------------------------------------------------------
--- Print the parameters
-------------------------------------------------------------------------------------------
 
 print (" Geometry: " .. gridName .. ", dim = " .. dim)
 print (" Physical parameter:")
@@ -71,11 +70,11 @@ print ("    pac			= " .. tostring (bPac))
 print ("    stab		= " .. stab)
 print ("    difflength	= " .. diffLength)
 print (" Numerical parameter of the solvers:")
-print ("    iluBeta		= " .. ilu_beta)
 
 ------------------------------------------------------------------------------------------
--- Initialize UG4, load, refine and distribute the grid
+-- Mesh and approximation space
 ------------------------------------------------------------------------------------------
+-- Loads/refines the benchmark mesh and defines first-order velocity/pressure.
 
 InitUG (dim, AlgebraType("CPU", dim + 1))
 
@@ -97,8 +96,10 @@ approxSpace:print_statistic()
 util.solver.defaults.approxSpace = approxSpace
 
 ------------------------------------------------------------------------------------------
--- Compose the discretization
+-- Discretization and boundary conditions
 ------------------------------------------------------------------------------------------
+-- Defines the parabolic inlet functions first and then assembles the interior,
+-- inlet, outlet, and no-slip wall terms.
 
 -- inner space
 NavierStokesDisc = NavierStokesFV1 ({"u", "v", "p"}, {"Inner"})
@@ -141,35 +142,36 @@ domainDisc:add (WallDisc)
 assembledOp = AssembledOperator (domainDisc)
 
 ------------------------------------------------------------------------------------------
--- Set up the solver
+-- Solver
 ------------------------------------------------------------------------------------------
+-- Uses Newton with a BiCGStab/GMG linear solve.
 
 solverDesc =
 {
-	type = "newton",
+	type = "newton", -- alternative for linear Stokes: a linear solver
 	linSolver =
 	{
-		type = "bicgstab",
+		type = "bicgstab", -- alternative: "gmres"
 		precond =
 		{
-			type = "gmg",
+			type = "gmg", -- alternative: "ilu" for a single-level solve
 			rap = false,
 			smoother =
 			{
 				type = "ilu",
-				beta = ilu_beta,
+					beta = -0.2, -- alternative: 0.0 for standard ILU
 				consistentInterfaces = true
 			},
 			preSmooth = 1,
 			postSmooth = 1,
-			baseSolver = "lu",
-			baseLevel = numPreRefs
+				baseSolver = "lu", -- alternative: "superlu" when available
+				baseLevel = 0
 		},
 		convCheck =
 		{
 			type		= "standard",
 			iterations	= 128,
-			absolute	= 1e-12,
+			absolute	= 1e-14,
 			reduction	= 0.5e-8,
 			verbose		= true
 		}
@@ -187,7 +189,7 @@ solverDesc =
 	{
 		type		= "standard",
 		iterations	= 256,
-		absolute	= 2.5e-12,
+		absolute	= 1e-14,
 		reduction	= 1e-8,
 		verbose		= true
 	}
@@ -196,8 +198,10 @@ solverDesc =
 solver = util.solver.CreateSolver(solverDesc)
 
 ------------------------------------------------------------------------------------------
--- Apply the solver
+-- Time discretization and initial values
 ------------------------------------------------------------------------------------------
+-- This is a steady model. The solution starts from zero with the analytical
+-- inlet profile interpolated into the initial x-velocity.
 
 -- grid function for the solution
 u = GridFunction (approxSpace)
@@ -214,15 +218,16 @@ OrderLex (approxSpace,  "x")
 solver:init (assembledOp)
 solver:prepare (u)
 
--- apply the solver
+-- Apply the stationary solver.
 if not solver:apply (u) then
 	print ("The solver failed.")
 	exit ()
 end
 
 ------------------------------------------------------------------------------------------
--- "Plot" the results
+-- Output
 ------------------------------------------------------------------------------------------
+-- Writes velocity components and pressure to the requested VTK prefix.
 
 out = VTKOutput()
 out:clear_selection ()
@@ -231,7 +236,7 @@ out:select_nodal ("u", "vel_u")
 out:select_nodal ("v", "vel_v")
 out:select_nodal ("p", "p")
 
-vtk_file_name = "Flow-lev" .. numRefs
+vtk_file_name = outputFileName
 if bStokes then
 	vtk_file_name = vtk_file_name .. "-Stokes"
 end

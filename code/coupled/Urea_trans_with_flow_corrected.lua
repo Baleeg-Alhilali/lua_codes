@@ -204,10 +204,13 @@ flowDomainDisc:add(flowOutlet)
 flowDomainDisc:add(flowWall)
 
 util.solver.defaults.approxSpace = flowSpace
+local flowLinearSolverDesc = {
+    type = "superlu" -- alternative: an iterative descriptor for large systems
+}
 print("Solving steady Stokes velocity field ...")
 local _, flowSolution = util.solver.SolveLinearProblem(
     flowDomainDisc,
-    "superlu"
+    flowLinearSolverDesc
 )
 
 -- Bridge the separately solved velocity into the transport discretization.
@@ -288,17 +291,18 @@ transportDomainDisc:add(basolateralTransport)
 transportDomainDisc:add(transportBoundary)
 
 util.solver.defaults.approxSpace = transportSpace
-transportSolver = util.solver.CreateSolver({
-    type = "newton",
+local transportSolverDesc = {
+    type = "newton", -- alternative for linearized runs: a linear solver
     convCheck = {
         type = "standard",
         iterations = 100,
-        absolute = 1e-15,
+        absolute = 1e-14,
         reduction = 1e-15,
         verbose = true
     },
-    linSolver = "superlu"
-})
+    linSolver = "superlu" -- alternative: an iterative descriptor for large systems
+}
+transportSolver = util.solver.CreateSolver(transportSolverDesc)
 
 timeDisc = ThetaTimeStep(transportDomainDisc, 1.0)
 timeIntegrator = SimpleTimeIntegrator(timeDisc)

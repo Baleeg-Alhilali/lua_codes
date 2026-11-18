@@ -33,11 +33,13 @@ from __future__ import annotations
 
 import argparse
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 
 DEFAULT_INPUT = Path("/Users/alhilaba/Desktop/1-4-range-filtered.swc")
+INPUT_LENGTH_TOLERANCE = sys.float_info.epsilon * 128.0
 
 
 @dataclass(frozen=True)
@@ -265,7 +267,10 @@ def segment_spacing_range(points: list[Point]) -> tuple[float, float]:
     return min(spacings), max(spacings)
 
 
-def append_if_distinct(points: list[Point], point: Point, min_distance: float = 1e-6) -> None:
+def append_if_distinct(points: list[Point], point: Point,
+                       min_distance: float | None = None) -> None:
+    if min_distance is None:
+        min_distance = INPUT_LENGTH_TOLERANCE
     if not points or distance(points[-1], point) > min_distance:
         points.append(point)
 
@@ -402,7 +407,7 @@ def resample_uniformly(points: list[Point], spacing: float) -> list[Point]:
         cumulative.append(cumulative[-1] + distance(points[index - 1], points[index]))
 
     total_length = cumulative[-1]
-    if total_length <= 1e-12:
+    if total_length <= INPUT_LENGTH_TOLERANCE:
         return [points[0]]
 
     resampled = [points[0]]
@@ -414,7 +419,7 @@ def resample_uniformly(points: list[Point], spacing: float) -> list[Point]:
 
         segment_start_distance = cumulative[segment_index - 1]
         segment_length = cumulative[segment_index] - segment_start_distance
-        if segment_length > 1e-12:
+        if segment_length > INPUT_LENGTH_TOLERANCE:
             weight = (target_distance - segment_start_distance) / segment_length
             append_if_distinct(
                 resampled,
@@ -538,11 +543,18 @@ def parse_args() -> argparse.Namespace:
             "Use 0 to preserve the existing interpolation output."
         ),
     )
+    parser.add_argument(
+        "--relative-tolerance",
+        type=float,
+        default=1e-10,
+        help="dimensionless geometric tolerance applied to the input scale",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Execute validation, smoothing, interpolation, resampling, and reporting."""
+    global INPUT_LENGTH_TOLERANCE
     args = parse_args()
     output = args.output
     if output is None:
@@ -552,6 +564,20 @@ def main() -> None:
     comments, nodes = read_swc(args.swc_file)
     order = single_trace_order(nodes)
     original_points = [as_point(nodes[node_id]) for node_id in order]
+    coordinates = ([point.x for point in original_points],
+                   [point.y for point in original_points],
+                   [point.z for point in original_points])
+    spans = [max(values) - min(values) for values in coordinates]
+    input_scale = math.sqrt(sum(span * span for span in spans))
+    segment_scale = args.resample_spacing if args.resample_spacing > 0.0 else max(
+        segment_spacing_range(original_points)[1], input_scale
+    )
+    if args.relative_tolerance <= 0.0:
+        raise ValueError("relative_tolerance must be positive")
+    INPUT_LENGTH_TOLERANCE = max(
+        sys.float_info.epsilon * input_scale * 128.0,
+        segment_scale * args.relative_tolerance,
+    )
     control_points = original_points
     pre_smooth_moved = 0
     sharp_before = 0

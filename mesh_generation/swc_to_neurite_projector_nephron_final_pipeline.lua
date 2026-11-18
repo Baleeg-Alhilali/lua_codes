@@ -108,7 +108,28 @@ cfg.padding = util.GetParamNumber("-padding",
 cfg.paddingX = util.GetParamNumber("-paddingX", cfg.padding)
 cfg.paddingY = util.GetParamNumber("-paddingY", cfg.padding)
 cfg.paddingZ = util.GetParamNumber("-paddingZ", cfg.padding)
+cfg.prismInterThickness = util.GetParamNumber(
+	"-prismInterThickness", cfg.padding)
 cfg.interQuality = util.GetParamNumber("-interQuality", 2.0)
+-- Dimensionless geometry policy. Physical tolerances are derived in C++ from
+-- the local tube radius, Basolateral edge length, or box-cell size and are
+-- bounded below by machine precision times the global domain scale.
+cfg.coordinateRelTol = util.GetParamNumber("-coordinateRelTol", 1e-10)
+cfg.containmentRelTol = util.GetParamNumber("-containmentRelTol", 1e-6)
+cfg.parameterTol = util.GetParamNumber("-parameterTol", 1e-7)
+cfg.mergeRadiusFactor = util.GetParamNumber("-mergeRadiusFactor", 1e-4)
+cfg.terminalSnapRadiusFactor = util.GetParamNumber(
+	"-terminalSnapRadiusFactor", 2.0)
+cfg.straightnessRadiusFactor = util.GetParamNumber(
+	"-straightnessRadiusFactor", 1e-7)
+cfg.angularSpacingToleranceFactor = util.GetParamNumber(
+	"-angularSpacingToleranceFactor", 1e-5)
+cfg.directionTolerance = util.GetParamNumber("-directionTolerance", 1e-8)
+cfg.interMinLayers = math.floor(util.GetParamNumber("-interMinLayers", 4))
+cfg.interMaxLayers = math.floor(util.GetParamNumber("-interMaxLayers", 12))
+cfg.interLayersPerSurfaceEdge = util.GetParamNumber(
+	"-interLayersPerSurfaceEdge", 3.0)
+cfg.interRadialGrowth = util.GetParamNumber("-interRadialGrowth", 2.0)
 -- Prefer -BoxRefs, while retaining the older -boxRefs spelling as an alias.
 cfg.boxRefs = math.floor(util.GetParamNumber("-BoxRefs",
 	util.GetParamNumber("-boxRefs", 4)))
@@ -326,6 +347,9 @@ end
 assert(cfg.swc ~= "", "Pass an SWC file with -swc <path>")
 assert(cfg.out ~= "", "Pass an output path with -out <path>")
 assert_positive("anisotropy", cfg.anisotropy)
+assert_positive("centerlineScale", cfg.centerlineScale)
+assert_positive("radius", cfg.radius)
+assert_positive("membraneThickness", cfg.membraneThickness)
 assert(cfg.anisotropy >= 1.0, "anisotropy must be >= 1")
 assert(cfg.bendAnisotropy >= 1.0 and cfg.bendAnisotropy <= cfg.anisotropy,
 	"bendAnisotropy must be between 1 and anisotropy")
@@ -344,6 +368,33 @@ assert_positive("paddingX", cfg.paddingX)
 assert_positive("paddingY", cfg.paddingY)
 assert_positive("paddingZ", cfg.paddingZ)
 assert(cfg.terminalPaddingFactor >= 0.0, "terminalPaddingFactor must be >= 0")
+assert_positive("coordinateRelTol", cfg.coordinateRelTol)
+assert_positive("containmentRelTol", cfg.containmentRelTol)
+assert_positive("parameterTol", cfg.parameterTol)
+assert_positive("mergeRadiusFactor", cfg.mergeRadiusFactor)
+assert_positive("terminalSnapRadiusFactor", cfg.terminalSnapRadiusFactor)
+assert_positive("straightnessRadiusFactor", cfg.straightnessRadiusFactor)
+assert_positive("angularSpacingToleranceFactor",
+	cfg.angularSpacingToleranceFactor)
+assert_positive("directionTolerance", cfg.directionTolerance)
+assert(cfg.coordinateRelTol <= 1e-2 and cfg.containmentRelTol <= 1e-2
+	and cfg.parameterTol <= 1e-2,
+	"coordinate, containment, and parameter tolerances must be <= 1e-2")
+assert(cfg.mergeRadiusFactor <= 0.1 and cfg.terminalSnapRadiusFactor <= 10
+	and cfg.straightnessRadiusFactor <= 0.1
+	and cfg.angularSpacingToleranceFactor <= 0.1,
+	"geometry scale factors exceed their safe ranges")
+assert(cfg.interMinLayers >= 2 and cfg.interMaxLayers >= cfg.interMinLayers,
+	"Inter layer bounds require 2 <= interMinLayers <= interMaxLayers")
+assert(cfg.interMaxLayers <= 64, "interMaxLayers must be <= 64")
+assert_positive("interLayersPerSurfaceEdge", cfg.interLayersPerSurfaceEdge)
+assert(cfg.interLayersPerSurfaceEdge <= 100,
+	"interLayersPerSurfaceEdge must be <= 100")
+assert(cfg.interRadialGrowth >= 0.0 and cfg.interRadialGrowth <= 20.0,
+	"interRadialGrowth must be between 0 and 20")
+if cfg.interMesh == "prism" then
+	assert_positive("prismInterThickness", cfg.prismInterThickness)
+end
 assert_positive("interQuality", cfg.interQuality)
 assert(cfg.boxRefs >= 0 and cfg.boxRefs <= 10,
 	"BoxRefs must be an integer from 0 to 10")
@@ -383,6 +434,7 @@ local smooth_command = table.concat({
 	"--pre-smooth-strength", tostring(cfg.preSmoothStrength),
 	"--pre-smooth-passes", tostring(cfg.preSmoothPasses),
 	"--resample-spacing", tostring(cfg.resampleSpacing),
+	"--relative-tolerance", tostring(cfg.coordinateRelTol),
 	"> /dev/null"
 }, " ")
 
@@ -411,7 +463,14 @@ configure_adaptive_nephron_meshing(
 	cfg.adaptiveAnisotropy, cfg.bendAnisotropy, cfg.bendChordErrorFactor,
 	cfg.gradedInter, cfg.interNearEdgeFactor, cfg.interNearDistanceFactor,
 	cfg.interFarDistanceFactor, cfg.interFarEdgeFactor,
-	cfg.interMesh == "prism")
+	cfg.interMesh == "prism",
+	cfg.prismInterThickness * MESH_LENGTH_SCALE)
+configure_nephron_geometry_policy(
+	cfg.coordinateRelTol, cfg.containmentRelTol, cfg.parameterTol,
+	cfg.mergeRadiusFactor, cfg.terminalSnapRadiusFactor,
+	cfg.straightnessRadiusFactor, cfg.angularSpacingToleranceFactor,
+	cfg.interMinLayers, cfg.interMaxLayers,
+	cfg.interLayersPerSurfaceEdge, cfg.interRadialGrowth)
 
 if cfg.useTraceEndpoints or cfg.extendTerminals then
 	local extended_swc = strip_extension(cfg.out) .. "_outerwall_extended.swc"
@@ -424,7 +483,9 @@ if cfg.useTraceEndpoints or cfg.extendTerminals then
 		"--padding-z", tostring(cfg.paddingZ * MESH_LENGTH_SCALE),
 		"--spacing", tostring(cfg.terminalSpacing * MESH_LENGTH_SCALE),
 		"--box-refs", tostring(cfg.boxRefs),
-		"--min-padding-factor", tostring(cfg.terminalPaddingFactor)
+		"--min-padding-factor", tostring(cfg.terminalPaddingFactor),
+		"--relative-tolerance", tostring(cfg.coordinateRelTol),
+		"--direction-tolerance", tostring(cfg.directionTolerance)
 	}
 	if cfg.useTraceEndpoints then
 		extension_parts[#extension_parts + 1] = "--endpoints-only"
@@ -470,6 +531,15 @@ print("Graded Inter: " .. tostring(cfg.gradedInter) .. ", edge factors "
 	.. ", distance factors " .. cfg.interNearDistanceFactor .. " -> "
 	.. cfg.interFarDistanceFactor)
 print("Inter mesh topology: " .. cfg.interMesh)
+print("Curved prismatic Inter thickness (um): " .. cfg.prismInterThickness)
+print("Geometry policy: coordinate/containment/parameter tolerances "
+	.. cfg.coordinateRelTol .. " / " .. cfg.containmentRelTol .. " / "
+	.. cfg.parameterTol .. "; merge/radius=" .. cfg.mergeRadiusFactor
+	.. ", terminal snap/radius=" .. cfg.terminalSnapRadiusFactor
+	.. ", straightness/radius=" .. cfg.straightnessRadiusFactor)
+print("Automatic Inter radial layers: " .. cfg.interMinLayers .. ".."
+	.. cfg.interMaxLayers .. ", layers/surface-edge="
+	.. cfg.interLayersPerSurfaceEdge .. ", growth=" .. cfg.interRadialGrowth)
 print("Centerline scale: " .. cfg.centerlineScale)
 print("SWC resample spacing (um): " .. cfg.resampleSpacing)
 print("Terminal extension spacing (um): " .. cfg.terminalSpacing)
