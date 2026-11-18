@@ -1,4 +1,15 @@
--- Resolve every relative input and output path from the Model directory.
+--------------------------------------------------------------------------------
+-- Model summary
+--------------------------------------------------------------------------------
+-- Solves steady lumen flow followed by one-way-coupled Darcy flow through
+-- Membrane and Inter. A prescribed Apical leakage velocity supplies the Darcy
+-- influx, while Outlet remains a natural zero-traction boundary.
+
+--------------------------------------------------------------------------------
+-- Dependencies
+--------------------------------------------------------------------------------
+-- Resolve every relative input and output path from the Model directory and
+-- load the UG4 libraries and plugins required by both subproblems.
 local __model_script = debug.getinfo(1, "S").source
 if __model_script:sub(1, 1) == "@" then __model_script = __model_script:sub(2) end
 if __model_script:sub(1, 1) ~= "/" then
@@ -40,18 +51,9 @@ Measured proximal-tubule water hydraulic conductivity:
   2.9--6.3e-5 cm/(s atm); the midpoint is used to estimate membrane K.
   https://pmc.ncbi.nlm.nih.gov/articles/PMC291894/
 
-Useful command-line overrides:
+Runtime inputs (all other values are in the Parameters block below):
   -numRefs 0
-  -meanInletVelocity 800
-  -leakageVelocity 0.25
-  -lumenRadius 1.0
-  -membraneThickness 0.2
-  -interPermeability 1e-3
-  -inletProjectionCorrection 1.5
-  -pressureStabilization 1e-6
-  -fullNavierStokes
-  -grid ProMeshFiles/runs/3rd_trace_third_boxref5.ugx
-  -swc ProMeshFiles/runs/3rd_trace_third_boxref5_outer_radius_1p2.swc
+  -output Results/velocity_field_coupled
 ]]
 
 ug_load_script("ug_util.lua")
@@ -64,36 +66,34 @@ AssertPluginsLoaded({"NavierStokes", "ConvectionDiffusion", "SuperLU6"})
 local totalStart = GetClockS()
 
 --------------------------------------------------------------------------------
--- Configuration
+-- Parameters
 --------------------------------------------------------------------------------
+-- Only -numRefs and -output are command-line inputs. Mesh paths, physical
+-- coefficients, discretization choices, and solver choices are set here.
 
 local dim = 3
-local gridName = util.GetParam(
-    "-grid",
-    "ProMeshFiles/runs/3rd_trace_third_boxref5.ugx"
-)
-local centerlineName = util.GetParam(
-    "-swc",
+local gridName = "ProMeshFiles/runs/3rd_trace_third_boxref5.ugx"
+local centerlineName =
     "ProMeshFiles/runs/3rd_trace_third_boxref5_outer_radius_1p2.swc"
-)
 
 -- SuperLU is a serial direct solver (gathered when MPI is used).  Keep the
 -- direct-solver default at the coarse mesh; increase only if memory permits.
 local numRefs = math.floor(util.GetParamNumber("-numRefs", 0))
-local numPreRefs = math.floor(util.GetParamNumber("-numPreRefs", 0))
-local solveFullNavierStokes = util.HasParamOption(
-    "-fullNavierStokes",
-    "apply the small nonlinear inertial correction after the Stokes solve"
-)
+local numPreRefs = 0
+local solveFullNavierStokes = false
 
-local meanInletVelocity = util.GetParamNumber("-meanInletVelocity", 800.0) -- um/s
-local leakageVelocity = util.GetParamNumber("-leakageVelocity", 0.25)       -- um/s
-local lumenRadius = util.GetParamNumber("-lumenRadius", 1.0)                -- um
-local membraneThickness = util.GetParamNumber("-membraneThickness", 0.2)   -- um
+local meanInletVelocity = 800.0 -- um/s
+local leakageVelocity = 0.25 -- um/s
+local lumenRadius = 1.0 -- um
+local membraneThickness = 0.2 -- um
 -- On the mesh's single-quadrilateral cap, NavierStokesInflowFE transfers
 -- two-thirds of the analytically integrated P2 parabola into the solved trace.
-local inletProjectionCorrection = util.GetParamNumber("-inletProjectionCorrection", 1.5)
-local pressureStabilization = util.GetParamNumber("-pressureStabilization", 1.0e-6)
+local inletProjectionCorrection = 1.5
+local pressureStabilization = 1.0e-6
+local outputFileName = util.GetParam(
+    "-output",
+    "Results/velocity_field_coupled",
+    "base prefix for lumen, membrane, and inter VTK output")
 
 -- Water at 37 C.
 local waterDensity = 993.0                     -- kg/m^3
@@ -102,15 +102,13 @@ local kinematicViscosity = 6.96e5             -- um^2/s
 
 -- Midpoint of 2.9--6.3e-5 cm/(s atm), converted to um/(Pa s).
 local membraneHydraulicConductivity = 4.54e-6 -- um/(Pa s)
-local membranePermeability = util.GetParamNumber(
-    "-membranePermeability",
-    membraneHydraulicConductivity * dynamicViscosity * membraneThickness
-)                                                -- um^2
+local membranePermeability =
+    membraneHydraulicConductivity * dynamicViscosity * membraneThickness -- um^2
 
 -- This is a modelling parameter because the mesh's Inter region is an
 -- effective porous continuum.  It is deliberately much more permeable than
 -- the epithelial Membrane.
-local interPermeability = util.GetParamNumber("-interPermeability", 1.0e-3) -- um^2
+local interPermeability = 1.0e-3 -- um^2
 
 assert(numRefs >= numPreRefs, "numRefs must be >= numPreRefs")
 assert(meanInletVelocity > 0.0, "meanInletVelocity must be positive")
@@ -122,8 +120,50 @@ assert(interPermeability > 0.0, "interPermeability must be positive")
 assert(pressureStabilization > 0.0, "pressureStabilization must be positive")
 
 --------------------------------------------------------------------------------
--- Centerline geometry used by the curved-boundary velocity callbacks
+-- Mesh and approximation space
 --------------------------------------------------------------------------------
+-- Load and refine the complete multiphysics mesh, then construct the lumen and
+-- porous approximation spaces on the shared domain.
+
+InitUG(dim, AlgebraType("CPU", 1))
+print("MPI processes: " .. NumProcs())
+
+local dom = util.CreateDomain(
+    gridName,
+    numPreRefs,
+    {"Lumen", "Membrane", "Basolateral", "Apical", "Inter",
+     "OuterWall", "Inlet", "Outlet"},
+    true
+)
+balancer.RefineAndRebalanceDomain(dom, numRefs - numPreRefs)
+
+print("Domain info:")
+print(dom:domain_info():to_string())
+
+local nsSpace = ApproximationSpace(dom)
+local lumenSupport = {"Lumen", "Apical", "Inlet", "Outlet"}
+nsSpace:add_fct({"u", "v", "w"}, "Lagrange", 2, lumenSupport)
+nsSpace:add_fct("p_lumen", "Lagrange", 1, "Lumen,Apical,Inlet,Outlet")
+nsSpace:init_levels()
+nsSpace:init_top_surface()
+nsSpace:print_statistic()
+
+local darcySpace = ApproximationSpace(dom)
+darcySpace:add_fct(
+    "p_darcy",
+    "Lagrange",
+    1,
+    "Membrane,Inter,Apical,Basolateral,OuterWall,Inlet,Outlet"
+)
+darcySpace:init_levels()
+darcySpace:init_top_surface()
+darcySpace:print_statistic()
+
+--------------------------------------------------------------------------------
+-- Discretization and boundary conditions
+--------------------------------------------------------------------------------
+-- Define all mesh-dependent boundary callbacks first so the equation blocks
+-- below can refer to them by their registered Lua names.
 
 local function loadCenterline(path)
     local points = {}
@@ -250,35 +290,8 @@ function DarcyLeakageVelocity(x, y, z, t, si)
 end
 
 --------------------------------------------------------------------------------
--- Domain
+-- Lumen equation
 --------------------------------------------------------------------------------
-
-InitUG(dim, AlgebraType("CPU", 1))
-print("MPI processes: " .. NumProcs())
-
-local dom = util.CreateDomain(
-    gridName,
-    numPreRefs,
-    {"Lumen", "Membrane", "Basolateral", "Apical", "Inter",
-     "OuterWall", "Inlet", "Outlet"},
-    true
-)
-balancer.RefineAndRebalanceDomain(dom, numRefs - numPreRefs)
-
-print("Domain info:")
-print(dom:domain_info():to_string())
-
---------------------------------------------------------------------------------
--- 1. Steady incompressible Navier--Stokes in Lumen
---------------------------------------------------------------------------------
-
-local nsSpace = ApproximationSpace(dom)
-local lumenSupport = {"Lumen", "Apical", "Inlet", "Outlet"}
-nsSpace:add_fct({"u", "v", "w"}, "Lagrange", 2, lumenSupport)
-nsSpace:add_fct("p_lumen", "Lagrange", 1, "Lumen,Apical,Inlet,Outlet")
-nsSpace:init_levels()
-nsSpace:init_top_surface()
-nsSpace:print_statistic()
 
 -- Normalize so -integral(u.n)dA = meanInletVelocity * inlet area exactly,
 -- independently of the polygonal cap approximation.
@@ -329,9 +342,18 @@ nsDomainDisc:add(leakageBC)
 -- natural zero-traction / no-stress condition.  UG4's explicit outflow helper
 -- is available only for its finite-volume Navier--Stokes discretizations.
 
+--------------------------------------------------------------------------------
+-- Solver
+--------------------------------------------------------------------------------
+-- Solve the lumen and porous problems sequentially. SuperLU is retained in
+-- this legacy one-way model; the monolithic production scripts use GMG.
+
 util.solver.defaults.approxSpace = nsSpace
+local nsLinearSolverDesc = {
+    type = "superlu" -- alternative: an iterative descriptor for large systems
+}
 local nsSolverDesc = {
-    type = "newton",
+    type = "newton", -- alternative for Stokes-only runs: a linear solver
     lineSearch = {
         type = "standard",
         maxSteps = 10,
@@ -343,16 +365,16 @@ local nsSolverDesc = {
     convCheck = {
         type = "standard",
         iterations = 20,
-        absolute = 1.0e-10,
+        absolute = 1e-14,
         reduction = 1.0e-10,
         verbose = true
     },
-    linSolver = "superlu"
+    linSolver = "superlu" -- alternative: an iterative descriptor for large systems
 }
 
 print("Solving the Stokes initial field in Lumen ...")
 local nsStart = GetClockS()
-local _, nsSolution = util.solver.SolveLinearProblem(nsDomainDisc, "superlu")
+local _, nsSolution = util.solver.SolveLinearProblem(nsDomainDisc, nsLinearSolverDesc)
 
 if solveFullNavierStokes then
     -- Add the convective term and converge the full steady Navier--Stokes
@@ -365,7 +387,7 @@ if solveFullNavierStokes then
     print("Applying the full Navier--Stokes correction in Lumen ...")
     assert(nsSolver:apply(nsSolution), "Navier--Stokes solve failed")
 else
-    print("Using the creeping-flow Navier--Stokes limit (pass -fullNavierStokes to include inertia).")
+    print("Using the creeping-flow Navier--Stokes limit configured in Parameters.")
 end
 print(string.format("Navier--Stokes runtime: %.6f min", (GetClockS() - nsStart) / 60.0))
 
@@ -382,22 +404,8 @@ end
 print(string.format("Darcy leakage projection scale: %.9e", darcyLeakageScale))
 
 --------------------------------------------------------------------------------
--- 2. Steady Darcy flow in Membrane and Inter
+-- Darcy discretization and boundary conditions
 --------------------------------------------------------------------------------
-
-local darcySpace = ApproximationSpace(dom)
-darcySpace:add_fct(
-    "p_darcy",
-    "Lagrange",
-    1,
-    -- Inlet/Outlet own the cap-rim vertices of adjacent Membrane elements, so
-    -- they must be in the support even though no Darcy equation is assembled
-    -- on the lumen caps themselves.
-    "Membrane,Inter,Apical,Basolateral,OuterWall,Inlet,Outlet"
-)
-darcySpace:init_levels()
-darcySpace:init_top_surface()
-darcySpace:print_statistic()
 
 -- Two constant-coefficient element discs share p_darcy at Basolateral.  Their
 -- assembled contributions enforce the usual pressure and normal-flux matching
@@ -441,14 +449,25 @@ darcyDomainDisc:add(darcyLeakageBC)
 darcyDomainDisc:add(darcyReference)
 
 util.solver.defaults.approxSpace = darcySpace
+local darcySolverDesc = {
+    type = "superlu" -- alternative: an iterative descriptor for large systems
+}
 print("Solving Darcy flow in Membrane and Inter ...")
 local darcyStart = GetClockS()
-local _, darcySolution = util.solver.SolveLinearProblem(darcyDomainDisc, "superlu")
+local _, darcySolution = util.solver.SolveLinearProblem(darcyDomainDisc, darcySolverDesc)
 print(string.format("Darcy runtime: %.6f min", (GetClockS() - darcyStart) / 60.0))
 
 --------------------------------------------------------------------------------
--- Output and flux checks
+-- Time discretization and initial values
 --------------------------------------------------------------------------------
+-- Both subproblems are steady. The linear solves create their zero initial
+-- states internally; the optional nonlinear correction starts from Stokes.
+
+--------------------------------------------------------------------------------
+-- Output
+--------------------------------------------------------------------------------
+-- Write separate lumen, membrane, and inter files from one requested prefix,
+-- then report the fluxes used to check conservation and one-way coupling.
 
 local lumenOut = VTKOutput()
 lumenOut:clear_selection()
@@ -457,14 +476,14 @@ lumenOut:clear_selection()
 -- across lumen mesh.
 lumenOut:select_element(lumenVelocityData, "velocity_um_per_s")
 lumenOut:select_nodal("p_lumen", "pressure_lumen")
-lumenOut:print_subsets("Results/velocity_field_lumen", nsSolution, "Lumen", 0, 0.0)
+lumenOut:print_subsets(outputFileName .. "_lumen", nsSolution, "Lumen", 0, 0.0)
 
 local membraneOut = VTKOutput()
 membraneOut:clear_selection()
 membraneOut:select_element(membraneDarcyVelocity, "darcy_velocity_um_per_s")
 membraneOut:select_nodal("p_darcy", "effective_pressure_Pa")
 membraneOut:print_subsets(
-    "Results/velocity_field_membrane",
+    outputFileName .. "_membrane",
     darcySolution,
     "Membrane",
     0,
@@ -476,7 +495,7 @@ interOut:clear_selection()
 interOut:select_element(interDarcyVelocity, "darcy_velocity_um_per_s")
 interOut:select_nodal("p_darcy", "effective_pressure_Pa")
 interOut:print_subsets(
-    "Results/velocity_field_inter",
+    outputFileName .. "_inter",
     darcySolution,
     "Inter",
     0,
@@ -502,4 +521,3 @@ print(string.format("Lumen apical leakage:   %.9e um^3/s", lumenLeakFlow))
 print(string.format("Lumen outlet flux:      %.9e um^3/s", lumenOutletFlow))
 print(string.format("Membrane imposed influx:%.9e um^3/s", prescribedDarcyLeakFlow))
 print(string.format("Total runtime:          %.6f min", (GetClockS() - totalStart) / 60.0))
-

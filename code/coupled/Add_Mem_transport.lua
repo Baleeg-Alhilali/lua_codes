@@ -23,6 +23,7 @@ gridName = "ProMeshFiles/runs/" .. gridS .. ".ugx"
 
 numRefs = util.GetParamNumber("-numRefs", 2)
 numPreRefs = util.GetParamNumber("-numPreRefs", 0)
+vtk_file_name = "Results/" .. gridS .. "_na_membrane_ref" .. numRefs
 
 endTime = util.GetParamNumber("-endTime", 0.020) -- [s]
 dt = util.GetParamNumber("-dt", 0.001)           -- [s]
@@ -193,21 +194,21 @@ domainDisc:add(dirichletBND)
 util.solver.defaults.approxSpace = approxSpace
 
 solverDesc = {
-    type = "newton",
+    type = "newton", -- alternative for linearized runs: a linear solver
 
     convCheck = {
         type = "standard",
         iterations = 5,
-        absolute = 1e-8,
+        absolute = 1e-14,
         reduction = 1e-8,
         verbose = true
     },
 
     linSolver = {
-        type = "bicgstab",
+        type = "bicgstab", -- alternative: "gmres"
 
         precond = {
-            type = "gmg",
+            type = "gmg", -- alternative: "ilu" for a single-level solve
 
             smoother = {
                 type = "gs",
@@ -218,7 +219,7 @@ solverDesc = {
             preSmooth = 4,
             postSmooth = 4,
             rap = true,
-            baseLevel = numPreRefs,
+            baseLevel = 0,
 
             baseSolver = {
                 type = "bicgstab",
@@ -231,7 +232,7 @@ solverDesc = {
                 convCheck = {
                     type = "standard",
                     iterations = 200,
-                    absolute = 1e-10,
+                    absolute = 1e-14,
                     reduction = 0.5e-8,
                     verbose = false
                 }
@@ -241,7 +242,7 @@ solverDesc = {
         convCheck = {
             type = "standard",
             iterations = 100,
-            absolute = 1e-8,
+            absolute = 1e-14,
             reduction = 0.5e-8,
             verbose = true
         }
@@ -260,7 +261,7 @@ solver = util.solver.CreateSolver(solverDesc)
 vtkLumen = VTKOutput()
 vtkLumen:select("c_na_lumen", "Na")
 vtkLumen:print_subsets(
-    "vtk/Na_lumen",
+    vtk_file_name .. "_lumen",
     u,
     "Lumen",
     step,
@@ -270,7 +271,7 @@ vtkLumen:print_subsets(
 vtkMembrane = VTKOutput()
 vtkMembrane:select("c_na_membrane", "Na")
 vtkMembrane:print_subsets(
-    "vtk/Na_membrane",
+    vtk_file_name .. "_membrane",
     u,
     "Membrane",
     step,
@@ -280,7 +281,7 @@ vtkMembrane:print_subsets(
 vtkInter = VTKOutput()
 vtkInter:select("c_na_inter", "Na")
 vtkInter:print_subsets(
-    "vtk/Na_inter",
+    vtk_file_name .. "_inter",
     u,
     "Inter",
     step,

@@ -25,7 +25,7 @@ else
 end
 InitUG(3, AlgebraType("CPU", 1))
 
-local grid = util.GetParam("-grid", MODEL_ROOT .. "/runs/sample_tree_projector.ugx")
+local grid = util.GetParam("-grid", MODEL_ROOT .. "/sample_tree_projector_zero.ugx")
 local out = util.GetParam("-out", MODEL_ROOT .. "/runs/promesh_refined.ugx")
 
 print("ProMesh refine check")

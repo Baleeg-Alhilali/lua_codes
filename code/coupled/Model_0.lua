@@ -347,6 +347,7 @@ end
 --------------------------------------------------------------------------------
 
 function CreateSolver(approxSpace)
+    util.solver.defaults.approxSpace = approxSpace
     local base = LU()
     local smoother
 
@@ -362,30 +363,49 @@ function CreateSolver(approxSpace)
         smoother = ComponentGaussSeidel(0.1, {"p"}, {0}, {1})
     end
 
-    -- These command-line parsers and factories follow the UG4 example and
-    -- allow solver/multigrid settings to be changed without editing this file.
-    local smooth = util.smooth.parseParams()
-    smoother = util.smooth.create(smooth)
-
-    local numPreSmooth, numPostSmooth, baseLev, cycle, bRAP = util.gmg.parseParams()
-    local gmg = util.gmg.create(
-        approxSpace, smoother, numPreSmooth, numPostSmooth,
-        cycle, base, baseLev, bRAP)
+    -- This legacy pressure correction requires an explicitly constructed GMG
+    -- object; all of its tunable settings are fixed numerically here.
+    local gmg = GeometricMultiGrid(approxSpace)
+    gmg:set_base_solver(base) -- alternative: SuperLU() when available
+    gmg:set_smoother(smoother) -- alternatives: ILU(), GaussSeidel()
+    gmg:set_base_level(0)
+    gmg:set_cycle_type("V") -- alternative: "W"
+    gmg:set_num_presmooth(2)
+    gmg:set_num_postsmooth(2)
+    gmg:set_rap(false)
+    gmg:set_transfer(StdTransfer())
     gmg:add_prolongation_post_process(AverageComponent("p"))
 
-    local solverParams = util.solver.parseParams()
-    local linearSolver = util.solver.create(solverParams, gmg)
-    if bStokes then
-        linearSolver:set_convergence_check(ConvCheck(10000, 1.0e-20, 1.0e-10, true))
-    else
-        linearSolver:set_convergence_check(ConvCheck(10000, 1.0e-20, 1.0e-8, true))
-    end
-
-    local newtonSolver = NewtonSolver()
-    newtonSolver:set_linear_solver(linearSolver)
-    newtonSolver:set_convergence_check(ConvCheck(500, 1.0e-20, 1.0e-8, true))
-    newtonSolver:set_line_search(StandardLineSearch(10, 1.0, 0.9, true, true))
-    return newtonSolver
+    local solverDesc = {
+        type = "newton", -- alternative for Stokes-only runs: a linear solver
+        lineSearch = {
+            type = "standard",
+            maxSteps = 10,
+            lambdaStart = 1.0,
+            lambdaReduce = 0.9,
+            acceptBest = true,
+            checkAll = true
+        },
+        convCheck = {
+            type = "standard",
+            iterations = 500,
+            absolute = 1e-14,
+            reduction = 1.0e-8,
+            verbose = true
+        },
+        linSolver = {
+            type = "bicgstab", -- alternatives: "gmres", or "lu" for small systems
+            precond = gmg,
+            convCheck = {
+                type = "standard",
+                iterations = 10000,
+                absolute = 1e-14,
+                reduction = 1.0e-10,
+                verbose = true
+            }
+        }
+    }
+    return util.solver.CreateSolver(solverDesc)
 end
 
 function ComputeNonLinearSolution(u, domainDisc, solver)

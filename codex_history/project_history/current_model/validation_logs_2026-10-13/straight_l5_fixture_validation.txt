@@ -1,0 +1,13 @@
+mesh: straight_l5_fixture_refined_5.ugx
+vertices: 1650561
+volumes: tetrahedrons=4194304, hexahedrons=786432, prisms=262144, pyramids=0, octahedrons=0
+minimum all-pairs edge ratio: 0.00025305034
+tetrahedra: inverted=0, exactly_zero=0, min_abs_signed_volume=3.53061387346e-17
+minimum normalized tetrahedron volume: 1.28891596597e-06
+serialized face adjacency: boundary=110592, two-sided=11347968
+unmatched serialized faces: 0
+duplicate serialized face geometries: 0
+non-manifold volume faces (>2 neighbors): 0
+duplicate subset assignments: 0
+interface contract: none (diagnostic fixture terminals remain inside box)
+VALIDATION: PASS

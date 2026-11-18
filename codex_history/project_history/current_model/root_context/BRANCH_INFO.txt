@@ -1,0 +1,20 @@
+BRANCH: main
+============
+
+OBJECTIVE
+---------
+Provide the stable, organized, reviewable version of the nephron model source.
+
+CONTENTS
+--------
+- Active transport, flow, and coupled Lua models under code/.
+- Active and archived mesh-generation tools under mesh_generation/.
+- Compact grids and nephron traces needed to reproduce workflows.
+- Documentation explaining commands, branches, layout, and design decisions.
+
+RULES
+-----
+- Keep generated meshes and solver outputs out of Git.
+- Make new work on the development branch, validate it, then merge to main.
+- Do not rewrite published main history.
+- Use the dated archive branch to recover the pre-organization layout.

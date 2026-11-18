@@ -35,6 +35,10 @@ cfg.smoother = util.GetParam("-smoother",
 	script_dir .. "/quadratic_interpolate_swc.py")
 cfg.readySwc = util.GetParam("-readySwc", "")
 cfg.extendTerminals = util.GetParamNumber("-extendTerminals", 1) ~= 0
+-- Keep the supplied centerline exactly unchanged and fit the structured
+-- OuterWall grid to its endpoints. The grid bounds are translated so each
+-- terminal is centered in the nearest wall cell; the nephron is never bent.
+cfg.useTraceEndpoints = util.GetParamNumber("-useTraceEndpoints", 0) ~= 0
 cfg.terminalExtender = util.GetParam("-terminalExtender",
 	script_dir .. "/extend_swc_terminals_to_outerwall.py")
 cfg.terminalPaddingFactor = util.GetParamNumber("-terminalPaddingFactor", 25.0)
@@ -78,6 +82,7 @@ cfg.interNearEdgeFactor = util.GetParamNumber("-interNearEdgeFactor", 2.0)
 cfg.interNearDistanceFactor = util.GetParamNumber("-interNearDistanceFactor", 1.5)
 cfg.interFarDistanceFactor = util.GetParamNumber("-interFarDistanceFactor", 6.0)
 cfg.interFarEdgeFactor = util.GetParamNumber("-interFarEdgeFactor", 6.0)
+cfg.interMesh = util.GetParam("-interMesh", "tet")
 cfg.ogrid = math.floor(util.GetParamNumber("-ogrid", 10))
 -- Keep one lumen-midpoint support ring between the center and Apical ring.
 -- Removing it makes projected cross-sectional refinement connect large child
@@ -90,6 +95,11 @@ cfg.coarseLumenCenterOnly = util.GetParamNumber("-coarseLumenCenterOnly", 0) ~= 
 -- memory. Cross-sectional-only refinement remains experimental (-crossOnly 1).
 cfg.numRefs = math.floor(util.GetParamNumber("-numRefs", 0))
 cfg.crossOnly = util.GetParamNumber("-crossOnly", 0) ~= 0
+-- Treat structural validation as part of mesh generation, not as an optional
+-- solver-debugging step.  This may be disabled only for special diagnostic
+-- fixtures with non-production boundary semantics.
+cfg.validate = util.GetParamNumber("-validate", 1) ~= 0
+cfg.validator = util.GetParam("-validator", script_dir .. "/validate_ugx_mesh.py")
 -- The non-terminal box clearance is tied both to the centerline and tube.
 cfg.padding = util.GetParamNumber("-padding",
 	math.max(10.0 * cfg.centerlineScale, 2.0 * requested_outer_radius))
@@ -98,7 +108,28 @@ cfg.padding = util.GetParamNumber("-padding",
 cfg.paddingX = util.GetParamNumber("-paddingX", cfg.padding)
 cfg.paddingY = util.GetParamNumber("-paddingY", cfg.padding)
 cfg.paddingZ = util.GetParamNumber("-paddingZ", cfg.padding)
+cfg.prismInterThickness = util.GetParamNumber(
+	"-prismInterThickness", cfg.padding)
 cfg.interQuality = util.GetParamNumber("-interQuality", 2.0)
+-- Dimensionless geometry policy. Physical tolerances are derived in C++ from
+-- the local tube radius, Basolateral edge length, or box-cell size and are
+-- bounded below by machine precision times the global domain scale.
+cfg.coordinateRelTol = util.GetParamNumber("-coordinateRelTol", 1e-10)
+cfg.containmentRelTol = util.GetParamNumber("-containmentRelTol", 1e-6)
+cfg.parameterTol = util.GetParamNumber("-parameterTol", 1e-7)
+cfg.mergeRadiusFactor = util.GetParamNumber("-mergeRadiusFactor", 1e-4)
+cfg.terminalSnapRadiusFactor = util.GetParamNumber(
+	"-terminalSnapRadiusFactor", 2.0)
+cfg.straightnessRadiusFactor = util.GetParamNumber(
+	"-straightnessRadiusFactor", 1e-7)
+cfg.angularSpacingToleranceFactor = util.GetParamNumber(
+	"-angularSpacingToleranceFactor", 1e-5)
+cfg.directionTolerance = util.GetParamNumber("-directionTolerance", 1e-8)
+cfg.interMinLayers = math.floor(util.GetParamNumber("-interMinLayers", 4))
+cfg.interMaxLayers = math.floor(util.GetParamNumber("-interMaxLayers", 12))
+cfg.interLayersPerSurfaceEdge = util.GetParamNumber(
+	"-interLayersPerSurfaceEdge", 3.0)
+cfg.interRadialGrowth = util.GetParamNumber("-interRadialGrowth", 2.0)
 -- Prefer -BoxRefs, while retaining the older -boxRefs spelling as an alias.
 cfg.boxRefs = math.floor(util.GetParamNumber("-BoxRefs",
 	util.GetParamNumber("-boxRefs", 4)))
@@ -126,6 +157,15 @@ local function ensure_dir(path)
 		local ok = os.execute("mkdir -p " .. shell_quote(path))
 		assert(ok == true or ok == 0, "Could not create directory: " .. path)
 	end
+end
+
+local function validate_ugx(path)
+	if not cfg.validate then return end
+	print("Validating generated mesh: " .. path)
+	local ok = os.execute("python3 " .. shell_quote(cfg.validator)
+		.. " " .. shell_quote(path))
+	assert(ok == true or ok == 0,
+		"Mesh validation failed; refusing to continue with: " .. path)
 end
 
 local function assert_positive(name, value)
@@ -304,20 +344,12 @@ local function assert_neurite_projector_ugx(path)
 		"UGX is missing the terminal TripleJunction subset: " .. path)
 end
 
-local function refine_with_promesh(src, dst, refs)
-	local mesh = Mesh()
-	assert(LoadMesh(mesh, src), "LoadMesh failed: " .. src)
-	for i = 1, refs do
-		SelectAll(mesh)
-		print("  projected refine " .. i .. " / " .. refs)
-		Refine(mesh)
-	end
-	assert(SaveMesh(mesh, dst), "SaveMesh failed: " .. dst)
-end
-
 assert(cfg.swc ~= "", "Pass an SWC file with -swc <path>")
 assert(cfg.out ~= "", "Pass an output path with -out <path>")
 assert_positive("anisotropy", cfg.anisotropy)
+assert_positive("centerlineScale", cfg.centerlineScale)
+assert_positive("radius", cfg.radius)
+assert_positive("membraneThickness", cfg.membraneThickness)
 assert(cfg.anisotropy >= 1.0, "anisotropy must be >= 1")
 assert(cfg.bendAnisotropy >= 1.0 and cfg.bendAnisotropy <= cfg.anisotropy,
 	"bendAnisotropy must be between 1 and anisotropy")
@@ -328,12 +360,41 @@ assert(cfg.interFarEdgeFactor >= cfg.interNearEdgeFactor,
 assert(cfg.interNearDistanceFactor >= 0.0
 	and cfg.interFarDistanceFactor > cfg.interNearDistanceFactor,
 	"Inter distance factors require 0 <= near < far")
+assert(cfg.interMesh == "tet" or cfg.interMesh == "prism",
+	"-interMesh must be 'tet' or 'prism'")
 assert(cfg.ogrid >= 4, "ogrid must be an integer >= 4")
 assert_positive("padding", cfg.padding)
 assert_positive("paddingX", cfg.paddingX)
 assert_positive("paddingY", cfg.paddingY)
 assert_positive("paddingZ", cfg.paddingZ)
 assert(cfg.terminalPaddingFactor >= 0.0, "terminalPaddingFactor must be >= 0")
+assert_positive("coordinateRelTol", cfg.coordinateRelTol)
+assert_positive("containmentRelTol", cfg.containmentRelTol)
+assert_positive("parameterTol", cfg.parameterTol)
+assert_positive("mergeRadiusFactor", cfg.mergeRadiusFactor)
+assert_positive("terminalSnapRadiusFactor", cfg.terminalSnapRadiusFactor)
+assert_positive("straightnessRadiusFactor", cfg.straightnessRadiusFactor)
+assert_positive("angularSpacingToleranceFactor",
+	cfg.angularSpacingToleranceFactor)
+assert_positive("directionTolerance", cfg.directionTolerance)
+assert(cfg.coordinateRelTol <= 1e-2 and cfg.containmentRelTol <= 1e-2
+	and cfg.parameterTol <= 1e-2,
+	"coordinate, containment, and parameter tolerances must be <= 1e-2")
+assert(cfg.mergeRadiusFactor <= 0.1 and cfg.terminalSnapRadiusFactor <= 10
+	and cfg.straightnessRadiusFactor <= 0.1
+	and cfg.angularSpacingToleranceFactor <= 0.1,
+	"geometry scale factors exceed their safe ranges")
+assert(cfg.interMinLayers >= 2 and cfg.interMaxLayers >= cfg.interMinLayers,
+	"Inter layer bounds require 2 <= interMinLayers <= interMaxLayers")
+assert(cfg.interMaxLayers <= 64, "interMaxLayers must be <= 64")
+assert_positive("interLayersPerSurfaceEdge", cfg.interLayersPerSurfaceEdge)
+assert(cfg.interLayersPerSurfaceEdge <= 100,
+	"interLayersPerSurfaceEdge must be <= 100")
+assert(cfg.interRadialGrowth >= 0.0 and cfg.interRadialGrowth <= 20.0,
+	"interRadialGrowth must be between 0 and 20")
+if cfg.interMesh == "prism" then
+	assert_positive("prismInterThickness", cfg.prismInterThickness)
+end
 assert_positive("interQuality", cfg.interQuality)
 assert(cfg.boxRefs >= 0 and cfg.boxRefs <= 10,
 	"BoxRefs must be an integer from 0 to 10")
@@ -373,6 +434,7 @@ local smooth_command = table.concat({
 	"--pre-smooth-strength", tostring(cfg.preSmoothStrength),
 	"--pre-smooth-passes", tostring(cfg.preSmoothPasses),
 	"--resample-spacing", tostring(cfg.resampleSpacing),
+	"--relative-tolerance", tostring(cfg.coordinateRelTol),
 	"> /dev/null"
 }, " ")
 
@@ -400,11 +462,19 @@ local lumen_scale = cfg.radius / outer_radius
 configure_adaptive_nephron_meshing(
 	cfg.adaptiveAnisotropy, cfg.bendAnisotropy, cfg.bendChordErrorFactor,
 	cfg.gradedInter, cfg.interNearEdgeFactor, cfg.interNearDistanceFactor,
-	cfg.interFarDistanceFactor, cfg.interFarEdgeFactor)
+	cfg.interFarDistanceFactor, cfg.interFarEdgeFactor,
+	cfg.interMesh == "prism",
+	cfg.prismInterThickness * MESH_LENGTH_SCALE)
+configure_nephron_geometry_policy(
+	cfg.coordinateRelTol, cfg.containmentRelTol, cfg.parameterTol,
+	cfg.mergeRadiusFactor, cfg.terminalSnapRadiusFactor,
+	cfg.straightnessRadiusFactor, cfg.angularSpacingToleranceFactor,
+	cfg.interMinLayers, cfg.interMaxLayers,
+	cfg.interLayersPerSurfaceEdge, cfg.interRadialGrowth)
 
-if cfg.extendTerminals then
+if cfg.useTraceEndpoints or cfg.extendTerminals then
 	local extended_swc = strip_extension(cfg.out) .. "_outerwall_extended.swc"
-	local extension_command = table.concat({
+	local extension_parts = {
 		"python3", shell_quote(cfg.terminalExtender), shell_quote(import_swc),
 		"-o", shell_quote(extended_swc),
 		"--padding", tostring(cfg.padding * MESH_LENGTH_SCALE),
@@ -413,8 +483,14 @@ if cfg.extendTerminals then
 		"--padding-z", tostring(cfg.paddingZ * MESH_LENGTH_SCALE),
 		"--spacing", tostring(cfg.terminalSpacing * MESH_LENGTH_SCALE),
 		"--box-refs", tostring(cfg.boxRefs),
-		"--min-padding-factor", tostring(cfg.terminalPaddingFactor)
-	}, " ")
+		"--min-padding-factor", tostring(cfg.terminalPaddingFactor),
+		"--relative-tolerance", tostring(cfg.coordinateRelTol),
+		"--direction-tolerance", tostring(cfg.directionTolerance)
+	}
+	if cfg.useTraceEndpoints then
+		extension_parts[#extension_parts + 1] = "--endpoints-only"
+	end
+	local extension_command = table.concat(extension_parts, " ")
 	local extension_ok = os.execute(extension_command)
 	assert(extension_ok == true or extension_ok == 0,
 		"Terminal-to-OuterWall SWC extension failed")
@@ -435,6 +511,10 @@ import_nephron_with_membrane_and_inter_from_swc(import_swc, coarse_ugx,
 	cfg.interQuality, cfg.boxRefs, cfg.ogrid, cfg.coarseLumenCenterOnly,
 	cfg.crossOnly)
 assert_neurite_projector_ugx(coarse_ugx)
+validate_ugx(coarse_ugx)
+for level = 1, cfg.numRefs do
+	validate_ugx(strip_extension(coarse_ugx) .. "_refined_" .. level .. ".ugx")
+end
 
 local numVertices, numEdges, numFaces, numVolumes = count_mesh_elements(out_ugx)
 print("Vertices: " .. numVertices)
@@ -450,11 +530,22 @@ print("Graded Inter: " .. tostring(cfg.gradedInter) .. ", edge factors "
 	.. cfg.interNearEdgeFactor .. " -> " .. cfg.interFarEdgeFactor
 	.. ", distance factors " .. cfg.interNearDistanceFactor .. " -> "
 	.. cfg.interFarDistanceFactor)
+print("Inter mesh topology: " .. cfg.interMesh)
+print("Curved prismatic Inter thickness (um): " .. cfg.prismInterThickness)
+print("Geometry policy: coordinate/containment/parameter tolerances "
+	.. cfg.coordinateRelTol .. " / " .. cfg.containmentRelTol .. " / "
+	.. cfg.parameterTol .. "; merge/radius=" .. cfg.mergeRadiusFactor
+	.. ", terminal snap/radius=" .. cfg.terminalSnapRadiusFactor
+	.. ", straightness/radius=" .. cfg.straightnessRadiusFactor)
+print("Automatic Inter radial layers: " .. cfg.interMinLayers .. ".."
+	.. cfg.interMaxLayers .. ", layers/surface-edge="
+	.. cfg.interLayersPerSurfaceEdge .. ", growth=" .. cfg.interRadialGrowth)
 print("Centerline scale: " .. cfg.centerlineScale)
 print("SWC resample spacing (um): " .. cfg.resampleSpacing)
 print("Terminal extension spacing (um): " .. cfg.terminalSpacing)
 print("OuterWall padding X/Y/Z (um): " .. cfg.paddingX .. " / "
 	.. cfg.paddingY .. " / " .. cfg.paddingZ)
 print("Mesh coordinate unit: mm")
-print("Terminal-to-OuterWall extension: " .. tostring(cfg.extendTerminals))
+print("Terminal mode: " .. (cfg.useTraceEndpoints and "unchanged trace endpoints"
+	or (cfg.extendTerminals and "extended to wall-cell centers" or "disabled")))
 print("Output: " .. out_ugx)

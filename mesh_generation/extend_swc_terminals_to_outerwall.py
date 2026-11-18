@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Extend unbranched SWC terminal paths to a fixed padded axis-aligned box.
+"""Place unbranched SWC terminal paths on a fixed axis-aligned box.
 
 The input is expected to use the mesh coordinate unit already (millimetres in
 the nephron pipeline).  The output carries UG4 metadata comments containing the
-fixed box bounds.  Each terminal transition is a low-bending cubic Bezier curve
-followed by a straight wall-normal tail.  The final SWC segments are therefore
-normal to the selected box face.
+fixed box bounds.  The default mode extends each terminal with a low-bending
+cubic Bezier transition followed by a straight wall-normal tail.  The optional
+``--endpoints-only`` mode leaves every centerline coordinate unchanged and
+moves the structured box grid instead: the endpoint planes become box faces
+and the tangential box bounds are shifted so each endpoint lies at the center
+of its nearest OuterWall cell.
 """
 
 from __future__ import annotations
@@ -14,10 +17,20 @@ import argparse
 from dataclasses import dataclass
 import math
 from pathlib import Path
+import sys
 from typing import Iterable, Sequence
 
 
 Vec = tuple[float, float, float]
+
+
+def scaled_length_tolerance(reference_scale: float, local_scale: float,
+                            relative_tolerance: float) -> float:
+    """Return a unit-independent tolerance with a machine-precision floor."""
+    return max(
+        sys.float_info.epsilon * abs(reference_scale) * 128.0,
+        abs(local_scale) * relative_tolerance,
+    )
 
 
 @dataclass
@@ -164,7 +177,99 @@ def fixed_box(nodes: Sequence[Node], padding: Vec) -> tuple[Vec, Vec]:
     )
 
 
-def choose_face(p: Vec, tangent: Vec, box_min: Vec, box_max: Vec) -> tuple[int, int, Vec, float, float]:
+def endpoint_aligned_box(chains: Sequence[Sequence[Node]], initial_min: Vec,
+                         initial_max: Vec, box_refs: int,
+                         relative_tolerance: float,
+                         direction_tolerance: float) -> tuple[Vec, Vec, list[str]]:
+    """Fit box faces/grid to existing endpoints without moving the centerline."""
+    box_min = list(initial_min)
+    box_max = list(initial_max)
+    terminals: list[tuple[str, Vec, int, int]] = []
+    diagnostics: list[str] = []
+    cells = 1 << box_refs
+    box_scale = math.sqrt(sum(
+        (box_max[d] - box_min[d]) ** 2 for d in range(3)
+    ))
+    minimum_cell = min(
+        (box_max[d] - box_min[d]) / cells for d in range(3)
+    )
+    tolerance = scaled_length_tolerance(
+        box_scale, minimum_cell, relative_tolerance
+    )
+
+    # Determine terminal faces from the unmodified endpoint tangents.
+    for index, chain in enumerate(chains, start=1):
+        for end_name, endpoint, tangent in (
+            ("root", chain[0], normalize(sub(chain[0].p, chain[1].p))),
+            ("tip", chain[-1], normalize(sub(chain[-1].p, chain[-2].p))),
+        ):
+            axis, sign, _, _, alignment = choose_face(
+                endpoint.p, tangent, initial_min, initial_max,
+                tolerance, direction_tolerance
+            )
+            terminals.append((f"nephron {index} {end_name}", endpoint.p, axis, sign))
+            if sign < 0:
+                box_min[axis] = endpoint.p[axis]
+            else:
+                box_max[axis] = endpoint.p[axis]
+            diagnostics.append(
+                f"nephron {index} {end_name}: {'xyz'[axis]}"
+                f"{'max' if sign > 0 else 'min'}, alignment={alignment:.6f}"
+            )
+
+    if any(box_min[d] >= box_max[d] for d in range(3)):
+        raise ValueError("Endpoint faces produce an invalid OuterWall box")
+
+    # A translation preserves each box extent and mesh-cell size. For every
+    # tangential coordinate, translate the grid by the smallest correction
+    # that places the endpoint at the center of its currently nearest cell.
+    corrections: dict[int, list[float]] = {0: [], 1: [], 2: []}
+    for _, point, normal_axis, _ in terminals:
+        for dimension in range(3):
+            if dimension == normal_axis:
+                continue
+            extent = box_max[dimension] - box_min[dimension]
+            scaled = (point[dimension] - box_min[dimension]) * cells / extent
+            cell = max(0, min(cells - 1, int(math.floor(scaled))))
+            center = box_min[dimension] + (cell + 0.5) * extent / cells
+            corrections[dimension].append(point[dimension] - center)
+
+    for dimension, values in corrections.items():
+        if not values:
+            continue
+        correction = sum(values) / len(values)
+        if any(abs(value - correction) > tolerance for value in values):
+            raise ValueError(
+                "Existing endpoints cannot all be centered by one structured-box "
+                f"translation along {'xyz'[dimension]}"
+            )
+        box_min[dimension] += correction
+        box_max[dimension] += correction
+
+    # Verify face contact and exact cell centering after all translations.
+    for label, point, axis, sign in terminals:
+        plane = box_max[axis] if sign > 0 else box_min[axis]
+        if abs(point[axis] - plane) > tolerance:
+            raise ValueError(f"{label} no longer lies on its selected box face")
+        indices = []
+        for dimension in range(3):
+            if dimension == axis:
+                continue
+            extent = box_max[dimension] - box_min[dimension]
+            scaled = (point[dimension] - box_min[dimension]) * cells / extent
+            cell = max(0, min(cells - 1, int(math.floor(scaled))))
+            center = box_min[dimension] + (cell + 0.5) * extent / cells
+            if abs(point[dimension] - center) > tolerance:
+                raise ValueError(f"{label} is not centered in an OuterWall cell")
+            indices.append(cell)
+        diagnostics.append(f"{label}: unchanged endpoint centered in cell={tuple(indices)}")
+
+    return tuple(box_min), tuple(box_max), diagnostics
+
+
+def choose_face(p: Vec, tangent: Vec, box_min: Vec, box_max: Vec,
+                length_tolerance: float,
+                direction_tolerance: float) -> tuple[int, int, Vec, float, float]:
     candidates = []
     for axis in range(3):
         for sign in (-1, 1):
@@ -172,7 +277,7 @@ def choose_face(p: Vec, tangent: Vec, box_min: Vec, box_max: Vec) -> tuple[int, 
             plane = box_max[axis] if sign > 0 else box_min[axis]
             wall_distance = (plane - p[axis]) * sign
             alignment = dot(tangent, normal)
-            if wall_distance > 1e-12 and alignment > 0.05:
+            if wall_distance > length_tolerance and alignment > direction_tolerance:
                 candidates.append((wall_distance, -alignment, axis, sign, normal, alignment))
     if not candidates:
         raise ValueError(
@@ -180,31 +285,41 @@ def choose_face(p: Vec, tangent: Vec, box_min: Vec, box_max: Vec) -> tuple[int, 
             "the trace endpoint may point back into the nephron"
         )
     min_distance = min(item[0] for item in candidates)
-    near = [item for item in candidates if item[0] <= min_distance * (1.0 + 1e-8) + 1e-12]
+    near = [
+        item for item in candidates
+        if item[0] <= min_distance * (1.0 + direction_tolerance)
+        + length_tolerance
+    ]
     chosen = min(near, key=lambda item: item[1])
     wall_distance, _, axis, sign, normal, alignment = chosen
     return axis, sign, normal, wall_distance, alignment
 
 
-def bending_objective(p0: Vec, c1: Vec, c2: Vec, p3: Vec, wall_normal: Vec, outward: Vec) -> float:
+def bending_objective(p0: Vec, c1: Vec, c2: Vec, p3: Vec,
+                      wall_normal: Vec, outward: Vec,
+                      length_tolerance: float,
+                      direction_tolerance: float,
+                      sample_count: int) -> float:
     energy = 0.0
     previous = p0
-    for index in range(1, 81):
-        t = index / 80.0
+    for index in range(1, sample_count + 1):
+        t = index / sample_count
         point = bezier(p0, c1, c2, p3, t)
         first, second = bezier_derivatives(p0, c1, c2, p3, t)
         speed = norm(first)
-        if speed <= 1e-12:
+        if speed <= length_tolerance:
             return math.inf
         curvature = norm(cross(first, second)) / (speed**3)
         ds = distance(previous, point)
         energy += curvature * curvature * ds
-        if dot(first, wall_normal) <= 1e-8:
-            energy += 1e8
-        if dot(sub(point, p0), outward) < -1e-9:
-            energy += 1e8
+        if dot(first, wall_normal) <= direction_tolerance * speed:
+            return math.inf
+        if dot(sub(point, p0), outward) < -length_tolerance:
+            return math.inf
         previous = point
-    return energy + 1e-4 * distance(p0, p3)
+    # curvature^2 ds has units 1/length; normalize by transition length so
+    # candidate ranking is unchanged when the complete input is rescaled.
+    return energy * max(distance(p0, p3), length_tolerance)
 
 
 def wall_cell_center(p: Vec, axis: int, sign: int, box_min: Vec, box_max: Vec,
@@ -226,11 +341,18 @@ def wall_cell_center(p: Vec, axis: int, sign: int, box_min: Vec, box_max: Vec,
 
 def optimized_transition(p: Vec, tangent: Vec, normal: Vec, wall: Vec,
                          wall_distance: float, spacing: float,
-                         radius: float) -> tuple[list[Vec], float]:
+                         radius: float, relative_tolerance: float,
+                         direction_tolerance: float) -> tuple[list[Vec], float]:
     tail = min(0.35 * wall_distance, max(3.0 * spacing, 2.0 * radius))
     tail = max(min(tail, 0.6 * wall_distance), 0.1 * wall_distance)
     transition_end = sub(wall, mul(normal, tail))
     chord = max(distance(p, transition_end), spacing)
+    length_tolerance = scaled_length_tolerance(
+        wall_distance, min(spacing, radius), relative_tolerance
+    )
+    objective_samples = max(
+        40, min(400, int(math.ceil(chord / max(spacing, length_tolerance))) * 8)
+    )
 
     best = None
     fractions = [0.12 + 0.06 * i for i in range(19)]
@@ -238,22 +360,33 @@ def optimized_transition(p: Vec, tangent: Vec, normal: Vec, wall: Vec,
         for f1 in fractions:
             c1 = add(p, mul(tangent, f0 * chord))
             c2 = sub(transition_end, mul(normal, f1 * chord))
-            objective = bending_objective(p, c1, c2, transition_end, normal, tangent)
+            objective = bending_objective(
+                p, c1, c2, transition_end, normal, tangent,
+                length_tolerance, direction_tolerance, objective_samples
+            )
             if best is None or objective < best[0]:
                 best = (objective, c1, c2)
     if best is None or not math.isfinite(best[0]):
         raise ValueError("Could not construct a monotone low-curvature terminal transition")
     _, c1, c2 = best
 
-    dense = [bezier(p, c1, c2, transition_end, i / 400.0) for i in range(401)]
-    tail_steps = max(3, int(math.ceil(tail / max(spacing * 0.25, 1e-12))))
+    curve_samples = max(
+        100, min(2000, int(math.ceil(chord / max(spacing, length_tolerance))) * 20)
+    )
+    dense = [
+        bezier(p, c1, c2, transition_end, i / curve_samples)
+        for i in range(curve_samples + 1)
+    ]
+    tail_steps = max(3, int(math.ceil(
+        tail / max(spacing * 0.25, length_tolerance)
+    )))
     dense.extend(add(transition_end, mul(normal, tail * i / tail_steps)) for i in range(1, tail_steps + 1))
 
     sampled = [dense[0]]
     carry = 0.0
     for a, b in zip(dense[:-1], dense[1:]):
         segment = distance(a, b)
-        if segment <= 1e-14:
+        if segment <= length_tolerance:
             continue
         while carry + segment >= spacing:
             fraction = (spacing - carry) / segment
@@ -262,20 +395,23 @@ def optimized_transition(p: Vec, tangent: Vec, normal: Vec, wall: Vec,
             segment = distance(a, b)
             carry = 0.0
         carry += segment
-    if distance(sampled[-1], wall) > 1e-10:
+    if distance(sampled[-1], wall) > length_tolerance:
         sampled.append(wall)
 
     max_curvature = 0.0
-    for i in range(1, 400):
-        first, second = bezier_derivatives(p, c1, c2, transition_end, i / 400.0)
+    for i in range(1, curve_samples):
+        first, second = bezier_derivatives(
+            p, c1, c2, transition_end, i / curve_samples
+        )
         speed = norm(first)
-        if speed > 1e-12:
+        if speed > length_tolerance:
             max_curvature = max(max_curvature, norm(cross(first, second)) / speed**3)
     return sampled, max_curvature
 
 
 def extend_chain(chain: Sequence[Node], box_min: Vec, box_max: Vec, spacing: float,
-                 box_refs: int, label: str) -> tuple[list[tuple[Vec, float, int]], list[str]]:
+                 box_refs: int, label: str, relative_tolerance: float,
+                 direction_tolerance: float) -> tuple[list[tuple[Vec, float, int]], list[str]]:
     root_tangent = normalize(sub(chain[0].p, chain[1].p))
     tip_tangent = normalize(sub(chain[-1].p, chain[-2].p))
     diagnostics = []
@@ -284,10 +420,20 @@ def extend_chain(chain: Sequence[Node], box_min: Vec, box_max: Vec, spacing: flo
         ("root", chain[0], root_tangent),
         ("tip", chain[-1], tip_tangent),
     ):
-        axis, sign, normal, wall_distance, alignment = choose_face(endpoint.p, tangent, box_min, box_max)
+        box_scale = math.sqrt(sum(
+            (box_max[d] - box_min[d]) ** 2 for d in range(3)
+        ))
+        length_tolerance = scaled_length_tolerance(
+            box_scale, max(spacing, endpoint.radius), relative_tolerance
+        )
+        axis, sign, normal, wall_distance, alignment = choose_face(
+            endpoint.p, tangent, box_min, box_max,
+            length_tolerance, direction_tolerance
+        )
         wall, cell = wall_cell_center(endpoint.p, axis, sign, box_min, box_max, box_refs)
         samples, max_curvature = optimized_transition(
-            endpoint.p, tangent, normal, wall, wall_distance, spacing, endpoint.radius
+            endpoint.p, tangent, normal, wall, wall_distance, spacing,
+            endpoint.radius, relative_tolerance, direction_tolerance
         )
         face_name = "xyz"[axis] + ("max" if sign > 0 else "min")
         diagnostics.append(
@@ -306,7 +452,7 @@ def extend_chain(chain: Sequence[Node], box_min: Vec, box_max: Vec, spacing: flo
     return output, diagnostics
 
 
-def write_swc(path: Path, chains: Sequence[Sequence[tuple[Vec, float, int]]], comments: Sequence[str], box_min: Vec, box_max: Vec) -> None:
+def write_swc(path: Path, chains: Sequence[Sequence[tuple[Vec, float, int]]], comments: Sequence[str], box_min: Vec, box_max: Vec, endpoints_only: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as out:
         out.write("# UG4_TERMINALS_ON_OUTER_WALL 1\n")
@@ -317,7 +463,10 @@ def write_swc(path: Path, chains: Sequence[Sequence[tuple[Vec, float, int]]], co
             ))
             + "\n"
         )
-        out.write("# Terminal extensions use low-bending cubic transitions and straight wall-normal tails.\n")
+        if endpoints_only:
+            out.write("# Existing SWC endpoints are unchanged and centered in OuterWall cells.\n")
+        else:
+            out.write("# Terminal extensions use low-bending cubic transitions and straight wall-normal tails.\n")
         for comment in comments:
             out.write(comment + "\n")
         next_id = 1
@@ -353,6 +502,12 @@ def main() -> None:
                         help="Outer-box refinement level used to center each terminal in its wall cell")
     parser.add_argument("--min-padding-factor", type=float, default=25.0,
                         help="minimum box padding as a multiple of the largest outer radius")
+    parser.add_argument("--endpoints-only", action="store_true",
+                        help="keep the SWC centerline unchanged; fit and align the box to its endpoints")
+    parser.add_argument("--relative-tolerance", type=float, default=1e-10,
+                        help="dimensionless geometric tolerance applied to local lengths")
+    parser.add_argument("--direction-tolerance", type=float, default=1e-8,
+                        help="dimensionless tangent/alignment comparison tolerance")
     args = parser.parse_args()
     requested_padding = (
         args.padding if args.padding_x is None else args.padding_x,
@@ -360,7 +515,9 @@ def main() -> None:
         args.padding if args.padding_z is None else args.padding_z,
     )
     if (args.padding <= 0.0 or any(value <= 0.0 for value in requested_padding)
-            or args.spacing <= 0.0 or args.min_padding_factor < 0.0):
+            or args.spacing <= 0.0 or args.min_padding_factor < 0.0
+            or args.relative_tolerance <= 0.0
+            or args.direction_tolerance <= 0.0):
         parser.error("padding/spacing must be positive and min-padding-factor nonnegative")
     if args.box_refs < 0 or args.box_refs > 10:
         parser.error("box-refs must be between 0 and 10")
@@ -376,19 +533,32 @@ def main() -> None:
             f"{effective_padding} mesh units to limit terminal curvature."
         )
     box_min, box_max = fixed_box(nodes, effective_padding)
-    extended = []
+    output_chains = []
     diagnostics = []
-    for index, chain in enumerate(chains, start=1):
-        result, messages = extend_chain(
-            chain, box_min, box_max, args.spacing, args.box_refs, f"nephron {index}"
+    if args.endpoints_only:
+        box_min, box_max, diagnostics = endpoint_aligned_box(
+            chains, box_min, box_max, args.box_refs,
+            args.relative_tolerance, args.direction_tolerance
         )
-        extended.append(result)
-        diagnostics.extend(messages)
-    write_swc(args.output, extended, comments, box_min, box_max)
+        output_chains = [
+            [(node.p, node.radius, node.kind) for node in chain]
+            for chain in chains
+        ]
+    else:
+        for index, chain in enumerate(chains, start=1):
+            result, messages = extend_chain(
+                chain, box_min, box_max, args.spacing, args.box_refs,
+                f"nephron {index}", args.relative_tolerance,
+                args.direction_tolerance
+            )
+            output_chains.append(result)
+            diagnostics.extend(messages)
+    write_swc(args.output, output_chains, comments, box_min, box_max,
+              endpoints_only=args.endpoints_only)
     print(f"Fixed OuterWall bounds: min={box_min}, max={box_max}")
     for message in diagnostics:
         print(message)
-    print(f"Extended SWC: {args.output}")
+    print(f"{'Endpoint-aligned' if args.endpoints_only else 'Extended'} SWC: {args.output}")
 
 
 if __name__ == "__main__":

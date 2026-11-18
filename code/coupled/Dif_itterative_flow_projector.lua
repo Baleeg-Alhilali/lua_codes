@@ -242,44 +242,43 @@ util.solver.defaults.approxSpace = approxSpace
 -- damped ILU on distributed levels, rediscretized coarse operators, and
 -- SuperLU only on the level-0 problem.  AverageComponent("p") cannot be used
 -- here because pressure is intentionally undefined on the non-lumen subsets.
-levelSmoother = ILU()
-levelSmoother:set_damp(0.7)
-levelSmoother:enable_overlap(true)
-levelSmoother:enable_consistent_interfaces(true)
-
-baseSolver = AgglomeratingSolver(SuperLU())
-
-gmgPreconditioner = GeometricMultiGrid(approxSpace)
-gmgPreconditioner:set_base_level(numPreRefs)
-gmgPreconditioner:set_base_solver(baseSolver)
-gmgPreconditioner:set_gathered_base_solver_if_ambiguous(true)
-gmgPreconditioner:set_smoother(levelSmoother)
-gmgPreconditioner:set_cycle_type("V")
-gmgPreconditioner:set_num_presmooth(4)
-gmgPreconditioner:set_num_postsmooth(4)
-gmgPreconditioner:set_rap(false)
-gmgPreconditioner:set_transfer(StdTransfer())
-
 solverDesc = {
-    type = "newton",
+    type = "newton", -- alternative for stationary Stokes: a linear solver
 
     convCheck = {
         type = "standard",
         iterations = 100,
-        absolute = 1e-15,
+        absolute = 1e-14,
         reduction = 1e-10,
         verbose = true
     },
 
     linSolver = {
-        type = "bicgstab",
+        type = "bicgstab", -- alternative: "gmres"
 
-        precond = gmgPreconditioner,
+        precond = {
+            type = "gmg", -- alternative: "ilu" for a single-level solve
+            approxSpace = approxSpace,
+            baseLevel = 0,
+            baseSolver = "superlu", -- alternative: iterative coarse solver
+            gatheredBaseSolverIfAmbiguous = true,
+            smoother = {
+                type = "ilu", -- alternatives: "jac", "gs"
+                damping = 0.7,
+                overlap = true,
+                consistentInterfaces = true
+            },
+            cycle = "V", -- alternative: "W"
+            preSmooth = 4,
+            postSmooth = 4,
+            rap = false,
+            transfer = "std"
+        },
 
         convCheck = {
             type = "standard",
             iterations = 100,
-            absolute = 1e-16,
+            absolute = 1e-14,
             reduction = 0.5e-10, -- 1e-6,
             verbose = true
         }

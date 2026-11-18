@@ -389,33 +389,33 @@ util.solver.defaults.approxSpace = approxSpace
 -- The overlapping Gauss-Seidel smoother and iterative overlapping-ILU base
 -- solver are MPI-compatible; no rank-local direct factorization is used.
 solverDesc = {
-    type = "newton",
+    type = "newton", -- alternative for linearized runs: a linear solver
     convCheck = {
         type = "standard", 
-        iterations = 8, absolute = 1e-8,
+        iterations = 8, absolute = 1e-14,
         reduction = 1e-8, verbose = true
     },
     linSolver = {
-        type = "bicgstab",
+        type = "bicgstab", -- alternative: "gmres"
         precond = {
-            type = "gmg",
+            type = "gmg", -- alternative: "ilu" for a single-level solve
             smoother = {type = "gs", overlap = true},
             cycle = "V",
             preSmooth = 4,
             postSmooth = 4,
             rap = true,
-            baseLevel = numPreRefs,
+            baseLevel = 0,
             baseSolver = {
                 type = "bicgstab",
                 precond = {type = "ilu", overlap = true},
                 convCheck = {
                     type = "standard", iterations = 200,
-                    absolute = 1e-10, reduction = 0.5e-8, verbose = false
+                    absolute = 1e-14, reduction = 0.5e-8, verbose = false
                 }
             }
         },
         convCheck = {
-            type = "standard", iterations = 100, absolute = 1e-8,
+            type = "standard", iterations = 100, absolute = 1e-14,
             reduction = 0.5e-8, verbose = true
         }
     }

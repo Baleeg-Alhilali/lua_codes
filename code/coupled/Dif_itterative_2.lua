@@ -101,21 +101,21 @@ util.solver.defaults.approxSpace = approxSpace
 -- Damped Jacobi is inexpensive and parallel, while GMG controls the iteration
 -- count as the mesh is refined.
 solverDesc = {
-    type = "newton",
+    type = "newton", -- alternative for linearized runs: a linear solver
 
     convCheck = {
         type = "standard",
         iterations = 5,
-        absolute = 1e-8,
+        absolute = 1e-14,
         reduction = 1e-8,
         verbose = true
     },
 
     linSolver = {
-        type = "bicgstab",
+        type = "bicgstab", -- alternative: "gmres"
 
         precond = {
-            type = "gmg",
+            type = "gmg", -- alternative: "ilu" for a single-level solve
             smoother = {
                 type = "gs", -- "jac",
                 overlap = true,
@@ -125,7 +125,7 @@ solverDesc = {
             preSmooth = 4, -- 3,
             postSmooth = 4, -- 3,
             rap = true, -- false,
-            baseLevel = numPreRefs,
+            baseLevel = 0,
 
             -- Keep the coarse solve distributed and iterative. Using "lu"
             -- here would invoke the expensive ILUT factorization.
@@ -139,7 +139,7 @@ solverDesc = {
                 convCheck = {
                     type = "standard",
                     iterations = 200,
-                    absolute = 1e-10,
+                    absolute = 1e-14,
                     reduction = 0.5e-8, -- 1e-4,
                     verbose = false
                 }
@@ -149,7 +149,7 @@ solverDesc = {
         convCheck = {
             type = "standard",
             iterations = 100,
-            absolute = 1e-8,
+            absolute = 1e-14,
             reduction = 0.5e-8, -- 1e-6,
             verbose = true
         }

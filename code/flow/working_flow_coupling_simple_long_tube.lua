@@ -1,4 +1,16 @@
--- Resolve every relative input and output path from the Model directory.
+--------------------------------------------------------------------------------
+-- Model summary
+--------------------------------------------------------------------------------
+-- Solves a steady monolithic Stokes--Darcy system with Beavers--Joseph--
+-- Saffman interface coupling. Stokes velocity/pressure are defined in the
+-- lumen, scaled Darcy pressure is defined in membrane/interstitium, and the
+-- reported Darcy pressure and velocity are converted back to physical units.
+
+--------------------------------------------------------------------------------
+-- Dependencies
+--------------------------------------------------------------------------------
+-- Resolves paths, loads UG4 utilities, and requires the discretization,
+-- projector, and coarse-grid solver plugins used below.
 local __model_script = debug.getinfo(1, "S").source
 if __model_script:sub(1, 1) == "@" then __model_script = __model_script:sub(2) end
 if __model_script:sub(1, 1) ~= "/" then
@@ -11,9 +23,6 @@ ChangeDirectory(MODEL_ROOT)
 ug_load_script("ug_util.lua")
 ug_load_script("util/load_balancing_util.lua")
 
--- Monolithic Stokes--Darcy--BJS model with separate Stokes and Darcy pressure
--- unknowns. The Darcy unknown is algebraically scaled, while all reported
--- pressures and velocities retain their physical kinematic units.
 AssertPluginsLoaded({
     "NavierStokes", "ConvectionDiffusion", "neuro_collection", "SuperLU6"
 })
@@ -21,23 +30,25 @@ AssertPluginsLoaded({
 total_start_time = GetClockS()
 
 --------------------------------------------------------------------------------
--- User configuration
+-- Parameters
 --------------------------------------------------------------------------------
+-- Only -numRefs and -output are terminal inputs. The mesh, physical model,
+-- pressure scaling, boundary data, and GMG controls are configured here.
 
 dim = 3
 
--- These are the only command-line parameters accepted by this script.
+-- Physics, discretization, and solver choices are edited here. The only
+-- command-line inputs are -numRefs and -output.
 numRefs = util.GetParamNumber("-numRefs", 0, "number of uniform refinements")
-bstokes = util.GetParamBool("-bstokes", true,
-    "true: Stokes flow; false: Navier--Stokes flow")
-vmax = util.GetParamNumber("-vmax", 3.0, "maximum inlet velocity [mm/s]")
+bstokes = true                      -- true: Stokes; false: Navier--Stokes
+vmax = 3.0                          -- maximum inlet velocity [mm/s]
 
 -- Geometry and physical parameters: edit values here, not on the command line.
 gridS = "stright_tube"
 gridName = "runs/" .. gridS .. ".ugx"
 numPreRefs = 0
 -- Physical lumen radius.  The ring at r = 5e-3 mm is the inner O-grid
--- transition, not the wall; the lumen/TripleJunction rim is at r = 1e-2 mm.
+-- transition, not the wall; the lumen/MembraneWall rim is at r = 1e-2 mm.
 inletRadius = 1.0e-2               -- [mm]
 inletCenterX = 2.286625           -- [mm]
 inletCenterY = 3.331125           -- [mm]
@@ -59,8 +70,13 @@ gmgBaseLevel = 0                  -- retain the loaded coarse mesh as the GMG ba
 
 -- MPI runs create .pvtu master files and one .vtu file per rank.
 local flowModelTag = bstokes and "stokes" or "navier_stokes"
-vtk_file_name = "Results_final/" .. gridS .. "_" .. flowModelTag
-    .. "_darcy_bjs_two_pressure_scaled_" .. solverSetup .. "_ref" .. numRefs
+vtk_file_name = util.GetParam(
+    "-output",
+    "Results_final/" .. gridS .. "_" .. flowModelTag
+        .. "_darcy_bjs_two_pressure_scaled_" .. solverSetup
+        .. "_ref" .. numRefs,
+    "VTK output prefix"
+)
 
 assert(numRefs >= 0, "numRefs must be non-negative")
 assert(vmax >= 0.0, "vmax must be non-negative")
@@ -83,10 +99,13 @@ print(string.format(
 ))
 
 --------------------------------------------------------------------------------
--- Domain
+-- Mesh and approximation space
 --------------------------------------------------------------------------------
+-- Loads the straight tube and its embedded refinement projectors, validates
+-- its subsets, refines the domain, and creates one coupled space.
 
 local function file_contains(path, needle)
+    -- Confirms that refinement-critical projector metadata exists before load.
     local file = assert(io.open(path, "r"), "Cannot open grid file: " .. path)
     for line in file:lines() do
         if string.find(line, needle, 1, true) then
@@ -107,44 +126,40 @@ assert(file_contains(gridName, '<vertex_attachment name="npSurfParams"'),
 
 print("Neurite-projector straight-tube grid: " .. gridName)
 
--- Loading once registers the custom npSurfParams attachment. Loading the
--- actual domain afterwards restores those values and the neurite projector.
-local registrationDomain = Domain()
-registrationDomain:create_additional_subset_handler("projSH")
-LoadDomain(registrationDomain, gridName)
-registrationDomain = nil
-collectgarbage("collect")
-
 dom = Domain()
 dom:create_additional_subset_handler("projSH")
 LoadDomain(dom, gridName)
 assert(util.CheckSubsets(dom,
     {"Lumen", "Membrane", "Inter", "Apical", "Basolateral",
-     "OuterWall", "MembraneWall", "Inlet", "Outlet", "TripleJunction"}),
+     "OuterWall", "MembraneWall", "Inlet", "Outlet"}),
     "The domain is missing a required Stokes--Darcy subset")
 
-if NumProcs() > 1 then
-    -- Build the complete projector-backed GMG hierarchy before its first MPI
-    -- distribution. This keeps the base operator agglomeratable as one system.
-    balancer.firstDistLvl = numRefs
-    balancer.ParseParameters()
-    print("First distribution level: " .. balancer.firstDistLvl)
-end
+-- UG4 commit 24ff76c4c broadcasts the serialized ProjectionHandler when the
+-- grid is loaded on rank 0, so the former double-load registration workaround
+-- is no longer required. Distribution is currently delayed until the finest
+-- level because distributed construction of this coupled GMG hierarchy still
+-- makes the outer Krylov iteration stagnate; this is separate from projector
+-- deserialization and is checked by the true-defect verifier below.
+balancer.firstDistLvl = numRefs
+-- Keep all load-balancing choices in this script; do not expose UG4's
+-- additional balancing command-line parameters.
+balancer.parametersParsed = true
+print("First distribution level: " .. balancer.firstDistLvl)
 balancer.RefineAndRebalanceDomain(dom, numRefs - numPreRefs)
 
 print("Domain info:")
 print(dom:domain_info():to_string())
 
 --------------------------------------------------------------------------------
--- One approximation space with separate pressure traces
+-- Approximation-space fields
 --------------------------------------------------------------------------------
 
 approxSpace = ApproximationSpace(dom)
 local allFlowSubsets =
-    "Lumen,Membrane,Inter,Apical,Basolateral,OuterWall,MembraneWall,Inlet,Outlet,TripleJunction"
+    "Lumen,Membrane,Inter,Apical,Basolateral,OuterWall,MembraneWall,Inlet,Outlet"
 local stokesAndInterfaceSubsetNames = {
     "Lumen", "Membrane", "Apical", "Basolateral", "MembraneWall",
-    "Inlet", "Outlet", "TripleJunction"
+    "Inlet", "Outlet"
 }
 approxSpace:add_fct(
     {"u", "v", "w", "p_stokes"}, "Lagrange", 1,
@@ -160,8 +175,10 @@ print("Monolithic Stokes--Darcy approximation space:")
 approxSpace:print_statistic()
 
 --------------------------------------------------------------------------------
--- Physical coefficients and boundary data
+-- Discretization and boundary conditions
 --------------------------------------------------------------------------------
+-- Defines mesh-derived inlet and interface directions first, then assembles
+-- the monolithic Stokes--Darcy, normal-continuity, and BJS terms.
 
 local membranePermeability = membranePermeabilityM2 * 1.0e6 -- [mm^2]
 local interPermeability = interPermeabilityM2 * 1.0e6       -- [mm^2]
@@ -200,7 +217,7 @@ function inletVelocity(x, y, z, t)
     return 0.0, 0.0, vmax * profile
 end
 
--- Stokes/Navier--Stokes problem in Lumen
+-- Stokes/Navier--Stokes equation in Lumen
 --------------------------------------------------------------------------------
 
 stokesEq = NavierStokesFV1({"u", "v", "w", "p_stokes"}, {"Lumen"})
@@ -222,7 +239,7 @@ stokesOpenBoundary = NavierStokesNoNormalStressOutflow(stokesEq)
 -- BJS term and does not assemble that mass flux.
 stokesOpenBoundary:add("Outlet,Apical")
 stokesRim = NavierStokesWall(stokesEq)
-stokesRim:add("TripleJunction")
+stokesRim:add("MembraneWall")
 
 -- BJS--Saffman: (sigma_S n)_t = -alpha*nu/sqrt(K) u_S,t.
 stokesBJS = NavierStokesWSBCFV1(stokesEq)
@@ -309,8 +326,10 @@ coupledDisc:add(darcyOuterPressure)
 coupledDisc:add(inactiveDarcy)
 coupledDisc:add(inactiveStokes)
 --------------------------------------------------------------------------------
--- One monolithic iterative solve
+-- Solver
 --------------------------------------------------------------------------------
+-- Solves the monolithic system with restarted BiCGStab and geometric
+-- multigrid while printing algebraic and componentwise true defects.
 
 local solve_start_time = GetClockS()
 local function outerLinearSolverDescription(space, disc)
@@ -320,10 +339,10 @@ local function outerLinearSolverDescription(space, disc)
     -- pressure in the main A block with velocity so its interface coupling is
     -- retained; putting both pressures in the Schur block destroys this.
     local gmgMainInverse = ILU()
-    gmgMainInverse:set_damp(0.8)
+    gmgMainInverse:set_damp(1.0)
     gmgMainInverse:set_inversion_eps(1.0e-30)
     local gmgStokesPressureInverse = ILU()
-    gmgStokesPressureInverse:set_damp(0.8)
+    gmgStokesPressureInverse:set_damp(1.0)
     gmgStokesPressureInverse:set_inversion_eps(1.0e-30)
     local gmgSmoother = UzawaBase({"p_stokes"})
     gmgSmoother:set_forward_iter(gmgMainInverse)
@@ -399,6 +418,14 @@ local function solveLinearSubproblem(space, disc, label)
         return norms
     end
     local initialDefects = trueComponentDefects()
+    local initialGlobalScaleSquared = 0.0
+    for component = 1, #componentNames do
+        initialGlobalScaleSquared = initialGlobalScaleSquared
+            + initialDefects[component] * initialDefects[component]
+    end
+    local initialGlobalScale = math.sqrt(initialGlobalScaleSquared)
+    local verifiedReduction = 1.0e-8
+    local verifiedAbsolute = 1.0e-12
     local solverDesc = outerLinearSolverDescription(space, disc)
     local solver = util.solver.CreateLinearSolver(solverDesc)
     print("=== " .. label .. " OUTER BiCGStab/"
@@ -414,17 +441,22 @@ local function solveLinearSubproblem(space, disc, label)
         local currentDefects = trueComponentDefects()
         converged = true
         for component = 1, #componentNames do
-            local relative = currentDefects[component]
-                / math.max(initialDefects[component], 1.0e-300)
+            -- Darcy has no independent right-hand side: its initial component
+            -- defect is exactly zero and is generated only after Stokes--Darcy
+            -- coupling becomes active. Use the global initial defect as the
+            -- reference floor so this component receives the same meaningful
+            -- relative tolerance as every non-zero initial component.
+            local reference = math.max(
+                initialDefects[component], initialGlobalScale
+            )
+            local relative = currentDefects[component] / reference
             print(string.format(
-                "TRUE DEFECT %-8s abs=%.6e relative-to-original=%.6e",
+                "TRUE DEFECT %-8s abs=%.6e relative-to-reference=%.6e",
                 componentNames[component], currentDefects[component], relative
             ))
-            local verifiedReduction = 1.0e-8
-            local verifiedAbsolute = 1.0e-12
             local target = math.max(
                 verifiedAbsolute,
-                initialDefects[component] * verifiedReduction
+                reference * verifiedReduction
             )
             if currentDefects[component] ~= currentDefects[component]
                 or currentDefects[component] > target then
@@ -445,6 +477,12 @@ coupledState = solveLinearSubproblem(
 )
 coupledState:set_consistent_storage_type()
 
+--------------------------------------------------------------------------------
+-- Time discretization and initial values
+--------------------------------------------------------------------------------
+-- This is a steady model, so no time discretization is required. The coupled
+-- solution is initialized to zero inside solveLinearSubproblem before assembly.
+
 -- Convert only the stored Darcy unknown back to physical pressure. Using this
 -- state for postprocessing also makes darcyEq:gradient() a physical gradient.
 physicalState = coupledState:clone()
@@ -454,8 +492,10 @@ ScaleGF(physicalState, coupledState, {
 physicalState:set_consistent_storage_type()
 
 --------------------------------------------------------------------------------
--- Darcy velocity and VTK output
+-- Output
 --------------------------------------------------------------------------------
+-- Writes lumen, membrane, and interstitial fields and reports pressure, flux,
+-- conservation, and outlet/leakage split diagnostics.
 
 darcyMembraneVelocity = DarcyVelocityLinker()
 darcyMembraneVelocity:set_permeability(membranePermeability)

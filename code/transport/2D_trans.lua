@@ -24,7 +24,7 @@ gridName = "ProMeshFiles/runs/" .. gridS .. ".ugx"
 
 numRefs = util.GetParamNumber("-numRefs", 4)
 numPreRefs = util.GetParamNumber("-numPreRefs", 0)
-vtk_file_name = "results/"..gridS .. numRefs
+vtk_file_name = "Results/"..gridS .. numRefs
 endTime = util.GetParamNumber("-endTime", 2.0) -- [s]
 dt = util.GetParamNumber("-dt", 0.1)           -- [s]
 
@@ -197,21 +197,21 @@ domainDisc:add(dirichletBND)
 util.solver.defaults.approxSpace = approxSpace
 
 solverDesc = {
-    type = "newton",
+    type = "newton", -- alternative for linearized runs: a linear solver
 
     convCheck = {
         type = "standard",
         iterations = 5,
-        absolute = 1e-8,
+        absolute = 1e-14,
         reduction = 1e-8,
         verbose = true
     },
 
     linSolver = {
-        type = "bicgstab",
+        type = "bicgstab", -- alternative: "gmres"
 
         precond = {
-            type = "gmg",
+            type = "gmg", -- alternative: "ilu" for a single-level solve
 
             smoother = {
                 type = "gs",
@@ -222,7 +222,7 @@ solverDesc = {
             preSmooth = 4,
             postSmooth = 4,
             rap = true,
-            baseLevel = numPreRefs,
+            baseLevel = 0,
 
             baseSolver = {
                 type = "bicgstab",
@@ -235,7 +235,7 @@ solverDesc = {
                 convCheck = {
                     type = "standard",
                     iterations = 200,
-                    absolute = 1e-10,
+                    absolute = 1e-14,
                     reduction = 0.5e-8,
                     verbose = false
                 }
@@ -245,7 +245,7 @@ solverDesc = {
         convCheck = {
             type = "standard",
             iterations = 100,
-            absolute = 1e-8,
+            absolute = 1e-14,
             reduction = 0.5e-8,
             verbose = true
         }

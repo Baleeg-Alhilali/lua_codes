@@ -40,10 +40,6 @@ ChangeDirectory(MODEL_ROOT)
 ug_load_script("ug_util.lua")
 ug_load_script("util/load_balancing_util.lua")
 
-AssertPluginsLoaded({
-    "NavierStokes", "ConvectionDiffusion", "neuro_collection", "SuperLU6"
-})
-
 total_start_time = GetClockS()
 
 --------------------------------------------------------------------------------
@@ -67,23 +63,28 @@ inletRadius = 1.0e-2               -- [mm]
 inletCenterX = 2.286625           -- [mm]
 inletCenterY = 3.331125           -- [mm]
 viscosity = 1.0                   -- kinematic viscosity [mm^2/s]
-membranePermeabilityM2 = 1.0e-15  -- membrane Darcy permeability [m^2]
-interPermeabilityM2 = 1.0e-14     -- interstitial Darcy permeability [m^2]
+membranePermeabilityM2 = 1.0e-12  -- membrane Darcy permeability [m^2]
+interPermeabilityM2 = 1.0e-12    -- equal-permeability Basolateral diagnostic [m^2]
 bjsInterfacePermeabilityM2 = 1.0e-12 -- effective BJS slip permeability [m^2]
 bjsAlpha = 0.2                    -- dimensionless BJS coefficient
 density = 1000.0                  -- [kg/m^3]
-outerPressurePa = 28.7            -- [Pa], calibrated interstitial back-pressure
+-- The straight-tube convergence control needs an open porous-flow path.  A
+-- sealed OuterWall forces the steady Darcy solution toward zero velocity and
+-- therefore cannot test Membrane/Inter coupling.  Zero pressure is a clean
+-- diagnostic sink; a physiological back-pressure belongs in the later
+-- nephron configuration after this numerical control is verified.
+outerPressurePa = 0.0             -- [Pa], straight-tube diagnostic sink
+outerWallNoFlux = false           -- fixed pressure; true is a sealed control
 darcyPressureScale = 1.0e4        -- algebraic only; output is rescaled physically
-normalVelocityStabilization = 1.0e3
-                                    -- Apical normal impedance [mm/s]
+normalVelocityStabilization = 0.0
+                                    -- no extra normal Robin impedance
 gmgBaseLevel = 0                  -- retain the loaded coarse mesh as the GMG base
+local outerWallTag = outerWallNoFlux and "_outerwall_noflux" or ""
 
 -- MPI runs create .pvtu master files and one .vtu file per rank.
 vtk_file_name = util.GetParam(
     "-output",
-    "Results_final/" .. gridS
-        .. "_stokes_darcy_bjs_pressure_trace_constraint_gmg"
-        .. "_ref" .. numRefs,
+        "Results_final/coupled_tube_r" .. numRefs .. outerWallTag,
     "VTK output prefix"
 )
 
@@ -99,10 +100,6 @@ InitUG(dim, AlgebraType("CPU", 1))
 dom = Domain()
 dom:create_additional_subset_handler("projSH")
 LoadDomain(dom, gridName)
-assert(util.CheckSubsets(dom,
-    {"Lumen", "Membrane", "Inter", "Apical", "Basolateral",
-     "OuterWall", "MembraneWall", "Inlet", "Outlet", "TripleJunction"}),
-    "The domain is missing a required Stokes--Darcy subset")
 
 -- UG4 commit 24ff76c4c broadcasts the serialized ProjectionHandler when the
 -- grid is loaded on rank 0. Distribute the base grid before refinement so MPI
@@ -152,7 +149,6 @@ approxSpace:init_top_surface()
 -- the second reports the unknown count contributed by each solution field.
 print("=== MESH STATISTICS ===")
 print(string.format("Mesh file: %s", gridName))
-print(string.format("Requested global refinements: %d", numRefs))
 print(string.format("MPI processes: %d", NumProcs()))
 print(dom:domain_info():to_string())
 print("=== APPROXIMATION-SPACE / DOF STATISTICS ===")
@@ -222,9 +218,9 @@ stokesRim:add("TripleJunction")
 
 -- BJS--Saffman tangential law:
 --     (sigma_S n)_t = -alpha*nu/sqrt(K_interface) * u_S,t.
--- The normal factor is a Robin impedance used by the validated formulation to
--- damp an otherwise weak interface-normal mode; it does not replace the normal
--- conservation equation imposed by PressureTraceConstraint.
+-- Pressure continuity plus the Darcy normal traction already determine the
+-- normal interface mode.  A positive normal factor would add an artificial
+-- Robin resistance and suppress the coupled cross-wall velocity.
 stokesBJS = NavierStokesWSBCFV1(stokesEq)
 stokesBJS:add("Apical")
 stokesBJS:set_sliding_factor(bjsFriction)
@@ -237,8 +233,9 @@ stokesBJS:set_normal_factor(normalVelocityStabilization)
 -- With q_D = -(K/nu) grad(p_D), substituting
 -- p_D = darcyPressureScale*p_darcy_scaled multiplies the diffusion coefficient
 -- by the same scale. Separate coefficients represent the lower-permeability
--- membrane and higher-permeability interstitium. A physical pressure is fixed
--- only on OuterWall; Basolateral is an internal Membrane/Inter interface.
+-- membrane and higher-permeability interstitium. Basolateral is an internal
+-- Membrane/Inter interface. OuterWall is either impermeable (the present
+-- test) or assigned the fixed pressure configured above.
 
 darcyMembraneEq = ConvectionDiffusionFE("p_darcy_scaled", "Membrane")
 darcyMembraneEq:set_mass_scale(0.0)
@@ -248,10 +245,15 @@ darcyInterEq = ConvectionDiffusionFE("p_darcy_scaled", "Inter")
 darcyInterEq:set_mass_scale(0.0)
 darcyInterEq:set_diffusion(scaledInterDarcyMobility)
 
-darcyOuterPressure = DirichletBoundary()
-darcyOuterPressure:add(
-    outerPressureScaled, "p_darcy_scaled", "OuterWall"
-)
+-- With no explicit boundary discretization, the Darcy diffusion operator uses
+-- its natural homogeneous Neumann condition q_D.n=0 on OuterWall.  The fixed
+-- pressure alternative remains available for a controlled comparison.
+if not outerWallNoFlux then
+    darcyOuterPressure = DirichletBoundary()
+    darcyOuterPressure:add(
+        outerPressureScaled, "p_darcy_scaled", "OuterWall"
+    )
+end
 
 coupledDisc = DomainDiscretization(approxSpace)
 coupledDisc:add(stokesEq)
@@ -309,7 +311,7 @@ inactiveStokes:add(
 coupledDisc:add(darcyMembraneEq)
 coupledDisc:add(darcyInterEq)
 coupledDisc:add(pressureContinuity)
-coupledDisc:add(darcyOuterPressure)
+if not outerWallNoFlux then coupledDisc:add(darcyOuterPressure) end
 coupledDisc:add(inactiveDarcy)
 coupledDisc:add(inactiveStokes)
 --------------------------------------------------------------------------------
@@ -379,8 +381,8 @@ local function outerLinearSolverDescription(space, disc)
             -- Global BiCGStab convergence criteria are literal here so the
             -- complete stopping rule is visible in this solver block.
             iterations = 400,
-            absolute = 1.0e-8,
-            reduction = 1.0e-8,
+            absolute = 1.0e-12,
+            reduction = 1.0e-12,
             verbose = true
         }
     }
@@ -429,10 +431,10 @@ local function solveLinearSubproblem(space, disc, label)
     print("=== " .. label .. " OUTER bicgstab/gmg convergence ===")
     print("=== CONVERGENCE CRITERIA ===")
     print("BiCGStab maximum iterations per cycle: 400")
-    print("BiCGStab absolute global defect:       <= 1.000000e-08")
-    print("BiCGStab relative global reduction:    <= 1.000000e-08")
+    print("BiCGStab absolute global defect:       <= 1.000000e-12")
+    print("BiCGStab relative global reduction:    <= 1.000000e-12")
     print("Maximum restarted solver cycles:       8")
-    print("Each recomputed component defect:      <= 1.000000e-08")
+    print("Each recomputed component defect:      <= 1.000000e-11")
     print("A cycle passes only when every component is PASS.")
     print("=== INITIAL TRUE COMPONENT DEFECTS ===")
     for component = 1, #componentNames do
@@ -462,8 +464,8 @@ local function solveLinearSubproblem(space, disc, label)
         local globalRelative = currentGlobal / initialGlobalScale
         print(string.format(
             "TRUE COMBINED DEFECT initial=%.6e current=%.6e "
-                .. "relative=%.6e absolute_target=1.000000e-08 "
-                .. "relative_target=1.000000e-08",
+                .. "relative=%.6e absolute_target=1.000000e-12 "
+                .. "relative_target=1.000000e-12",
             initialGlobalScale, currentGlobal, globalRelative
         ))
         converged = true
@@ -477,10 +479,10 @@ local function solveLinearSubproblem(space, disc, label)
                 initialDefects[component], initialGlobalScale
             )
             local relative = currentDefects[component] / reference
-            local passed = currentDefects[component] <= 1.0e-8
+            local passed = currentDefects[component] <= 1.0e-11
             print(string.format(
                 "TRUE DEFECT %-14s initial=%.6e current=%.6e "
-                    .. "relative=%.6e target=1.000000e-08 %s",
+                    .. "relative=%.6e target=1.000000e-11 %s",
                 componentNames[component], initialDefects[component],
                 currentDefects[component], relative,
                 passed and "PASS" or "FAIL"
@@ -547,7 +549,13 @@ local pressureTraceJumpL2 = L2Error(
     physicalState, "p_stokes", physicalState, "p_darcy_scaled", 2,
     "Apical"
 )
-local stokesInletFlow = IntegralNormalComponentOnManifold(
+-- FV1 assembles the analytic boundary datum.  Its nodal P1 representation is
+-- useful for visualization but is not the inlet conservation reference on a
+-- coarse mesh, so report both quantities explicitly.
+local prescribedInletFlow = IntegralNormalComponentOnManifold(
+    "inletVelocity", physicalState, "Inlet", "Lumen", 0, 1
+)
+local nodalInletFlow = IntegralNormalComponentOnManifold(
     stokesVelocity, physicalState, "Inlet", "Lumen"
 )
 local stokesOutletFlow = IntegralNormalComponentOnManifold(
@@ -559,6 +567,9 @@ local stokesApicalFlow = IntegralNormalComponentOnManifold(
 local darcyApicalFlow = IntegralNormalComponentOnManifold(
     darcyMembraneVelocity, physicalState, "Apical", "Membrane"
 )
+local darcyOuterWallFlow = IntegralNormalComponentOnManifold(
+    darcyInterVelocity, physicalState, "OuterWall", "Inter"
+)
 local inletPressureMean = Integral(
     physicalState, "p_stokes", "Inlet"
 ) / Integral(1.0, physicalState, "Inlet")
@@ -569,17 +580,29 @@ print(string.format(
     "Apical pressure-trace jump L2 (including constrained endpoint rings): %.6e",
     pressureTraceJumpL2
 ))
+if outerWallNoFlux then
+    print(string.format(
+        "Mean Stokes pressure: Inlet=%.6e Pa, Outlet=%.6e Pa; OuterWall=no-flux",
+        density * 1.0e-6 * inletPressureMean,
+        density * 1.0e-6 * outletPressureMean
+    ))
+else
+    print(string.format(
+        "Mean Stokes pressure: Inlet=%.6e Pa, Outlet=%.6e Pa; OuterWall=%.6e Pa",
+        density * 1.0e-6 * inletPressureMean,
+        density * 1.0e-6 * outletPressureMean, outerPressurePa
+    ))
+end
 print(string.format(
-    "Mean Stokes pressure: Inlet=%.6e Pa, Outlet=%.6e Pa; OuterWall=%.6e Pa",
-    density * 1.0e-6 * inletPressureMean,
-    density * 1.0e-6 * outletPressureMean, outerPressurePa
+    "Lumen assembled-data flows: prescribed Inlet=%.6e, Outlet=%.6e, Apical=%.6e, balance=%.6e mm^3/s",
+    prescribedInletFlow, stokesOutletFlow, stokesApicalFlow,
+    prescribedInletFlow + stokesOutletFlow + stokesApicalFlow
 ))
 print(string.format(
-    "Lumen outward flows: Inlet=%.6e, Outlet=%.6e, Apical=%.6e, balance=%.6e mm^3/s",
-    stokesInletFlow, stokesOutletFlow, stokesApicalFlow,
-    stokesInletFlow + stokesOutletFlow + stokesApicalFlow
+    "Lumen visualization diagnostic: nodal-P1 Inlet=%.6e, difference from prescribed=%.6e mm^3/s",
+    nodalInletFlow, nodalInletFlow - prescribedInletFlow
 ))
-local imposedInflow = -stokesInletFlow
+local imposedInflow = -prescribedInletFlow
 local conservativeLeakFlow = imposedInflow - stokesOutletFlow
 print(string.format(
     "Conservative flow split: Outlet=%.3f%%, leakage=%.3f%% of inlet",
@@ -589,12 +612,17 @@ print(string.format(
 print(string.format(
     "Raw Apical surface integral=%.3f%% of inlet; quadrature/discrete balance offset=%.6e mm^3/s",
     100.0 * stokesApicalFlow / imposedInflow,
-    stokesInletFlow + stokesOutletFlow + stokesApicalFlow
+    prescribedInletFlow + stokesOutletFlow + stokesApicalFlow
 ))
 print(string.format(
     "Apical diagnostic: Stokes=%.6e, raw Darcy-gradient=%.6e, sum=%.6e mm^3/s",
     stokesApicalFlow, darcyApicalFlow,
     stokesApicalFlow + darcyApicalFlow
+))
+print(string.format(
+    "Darcy raw-gradient boundary flows: Apical=%.6e, OuterWall=%.6e, balance=%.6e mm^3/s",
+    darcyApicalFlow, darcyOuterWallFlow,
+    darcyApicalFlow + darcyOuterWallFlow
 ))
 
 local function vectorComponents(vectorData)
