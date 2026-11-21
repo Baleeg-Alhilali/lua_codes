@@ -242,7 +242,7 @@ void configure_adaptive_nephron_meshing
 	              || interFarDistanceFactor <= interNearDistanceFactor,
 	              "Inter distance factors require 0 <= near < far.");
 	UG_COND_THROW(prismaticInterThickness < 0.0,
-	              "Prismatic Inter thickness must be non-negative.");
+	              "Structured near-Inter thickness must be non-negative.");
 	g_adaptiveNephronMeshing.curvatureLimitedAnisotropy = curvatureLimitedAnisotropy;
 	g_adaptiveNephronMeshing.minimumBendAnisotropy = minimumBendAnisotropy;
 	g_adaptiveNephronMeshing.bendChordErrorFactor = bendChordErrorFactor;
@@ -261,8 +261,8 @@ void configure_adaptive_nephron_meshing
 	        << ", Inter edge factors=" << interNearEdgeFactor << " -> "
 	        << interFarEdgeFactor << ", distance factors="
 	        << interNearDistanceFactor << " -> " << interFarDistanceFactor
-	        << ", Inter topology=" << (prismaticInter ? "prism" : "tet")
-	        << ", curved prism thickness=" << prismaticInterThickness
+	        << ", Inter topology=" << (prismaticInter ? "prism" : "hex")
+	        << ", structured near-Inter thickness=" << prismaticInterThickness
 	        << ".");
 }
 
@@ -5167,7 +5167,11 @@ static void add_straight_prismatic_inter_to_version2_nephron
 			std::fabs(ringCenters[s][0] - ringCenters[0][0]) <= straightTolerance &&
 			std::fabs(ringCenters[s][1] - ringCenters[0][1]) <= straightTolerance;
 
-	if (!straightZ)
+	// The hexahedral option uses the conforming near-field/far-field hybrid for
+	// both curved and straight traces.  Its radial-angular cross-section is
+	// quadrilateral, whereas the legacy full-box straight path is triangular
+	// and can therefore only be swept into prisms.
+	if (!straightZ || !g_adaptiveNephronMeshing.prismaticInter)
 	{
 		g_adaptiveNephronMeshing.curvedPrismaticInterGenerated = true;
 		UG_COND_THROW(boxPadding <= 0.0,
@@ -5335,18 +5339,30 @@ static void add_straight_prismatic_inter_to_version2_nephron
 					q >= (addedLayerCount - 1) * angularCount;
 				if (!transitionCell)
 				{
-					// Split the radial-angular quadrilateral once and sweep its two
-					// triangles along the trace. Each sector therefore consists of two
-					// curved prisms, while its inner radial side remains one ordinary
-					// Basolateral quadrilateral shared with the Membrane hexahedron.
-					Prism* p0 = *g.create<Prism>(PrismDescriptor(
-						v[0],v[1],v[2],v[4],v[5],v[6]));
-					Prism* p1 = *g.create<Prism>(PrismDescriptor(
-						v[0],v[2],v[3],v[4],v[6],v[7]));
-					sh.assign_subset(p0, 5); sh.assign_subset(p1, 5);
-					psh.assign_subset(p0, 0); psh.assign_subset(p1, 0);
-					interNearVolumes.push_back(p0);
-					interNearVolumes.push_back(p1);
+					if (g_adaptiveNephronMeshing.prismaticInter)
+					{
+						// Split the radial-angular quadrilateral once and sweep its
+						// two triangles along the trace.
+						Prism* p0 = *g.create<Prism>(PrismDescriptor(
+							v[0],v[1],v[2],v[4],v[5],v[6]));
+						Prism* p1 = *g.create<Prism>(PrismDescriptor(
+							v[0],v[2],v[3],v[4],v[6],v[7]));
+						sh.assign_subset(p0, 5); sh.assign_subset(p1, 5);
+						psh.assign_subset(p0, 0); psh.assign_subset(p1, 0);
+						interNearVolumes.push_back(p0);
+						interNearVolumes.push_back(p1);
+					}
+					else
+					{
+						// Preserve the radial-angular quadrilateral and sweep it as
+						// one conforming hexahedron.  The inner face is exactly the
+						// Basolateral quad shared with the Membrane hexahedron.
+						Hexahedron* hex = *g.create<Hexahedron>(HexahedronDescriptor(
+							v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7]));
+						sh.assign_subset(hex, 5);
+						psh.assign_subset(hex, 0);
+						interNearVolumes.push_back(hex);
+					}
 					continue;
 				}
 				std::array<Vertex*,8> rec = {{v[0],v[1],v[2],v[3],
@@ -5498,7 +5514,9 @@ static void add_straight_prismatic_inter_to_version2_nephron
 		sh.set_subset_name("Apical", 3);
 		sh.set_subset_name("OuterWall", 4);
 		sh.set_subset_name("Inter", 5);
-		UG_LOGN("Added hybrid conforming Inter: axial stations="
+		UG_LOGN("Added hybrid conforming "
+		        << (g_adaptiveNephronMeshing.prismaticInter ? "prismatic" : "hexahedral")
+		        << " Inter: axial stations="
 		        << rings.size() << ", angular vertices=" << angularCount
 		        << ", near-field thickness=" << curvedInterThickness
 		        << ", near-field volumes=" << interNearVolumes.size()
@@ -8429,9 +8447,13 @@ static void import_er_neurites_from_swc_impl
 	SubsetHandler psh(g);
 	psh.set_default_subset_index(0);
 
-	// Combined nephron/Inter grids must serialize the projector against defSH.
-	// proMesh reloads defSH reliably, whereas a separate projSH can be lost as
-	// the active projector subset handler during Mesh-based refinement.
+	// Combined nephron/Inter grids serialize the projector against defSH.
+	// The prism path projects both biological interfaces.  Standard hex
+	// subdivision cannot safely curve only the Basolateral face: one child of
+	// every swept Inter hex folds.  The hex option therefore keeps Basolateral
+	// and Inter linear while retaining exact Apical projection for the lumen.
+	const bool linearHexBasolateral =
+		fillInter && !g_adaptiveNephronMeshing.prismaticInter;
 	ProjectionHandler projHandler(fillInter ? &sh : &psh);
 	SmartPtr<IGeometry<3> > geom3d = MakeGeometry3d(g, aPosition);
 	projHandler.set_geometry(geom3d);
@@ -8439,7 +8461,8 @@ static void import_er_neurites_from_swc_impl
 	SmartPtr<NeuriteProjector> neuriteProj(new NeuriteProjector(geom3d));
 	if (fillInter && indexedNephrons == 0)
 	{
-		projHandler.set_projector(2, neuriteProj); // Basolateral
+		if (!linearHexBasolateral)
+			projHandler.set_projector(2, neuriteProj); // Basolateral
 		projHandler.set_projector(3, neuriteProj); // Apical
 	}
 	else if (!fillInter)
@@ -8472,16 +8495,11 @@ static void import_er_neurites_from_swc_impl
 		                          &terminalMetadata, &aaSurfParams);
 	if (fillInter)
 	{
-		if (g_adaptiveNephronMeshing.prismaticInter)
-			add_straight_prismatic_inter_to_version2_nephron(
-				g, sh, psh, aaPos, aaSurfParams, terminalMetadata, boxPadding);
-		else
-			// Tetrahedralize Inter on an isolated copy so TetGen cannot delete or
-			// move projector-backed tube vertices. Retain the established
-			// constrained Basolateral representation for the selectable tet path;
-			// the experimental pyramid/tetra transition is not refinement-safe.
-			add_isolated_inter_to_version2_nephron(g, sh, psh, aaPos,
-				aaSurfParams, interTetQuality, true, false, 2, true);
+		// Both selectable paths use the same conforming swept near field.
+		// The boolean selects two triangular prisms per cross-section quad or
+		// one hexahedron per quad.  The far field remains tetrahedral.
+		add_straight_prismatic_inter_to_version2_nephron(
+			g, sh, psh, aaPos, aaSurfParams, terminalMetadata, boxPadding);
 	}
 	if (fillInter)
 	{
@@ -8515,7 +8533,8 @@ static void import_er_neurites_from_swc_impl
 			// supporting Lumen/Membrane vertices on straight chords.
 			projHandler.set_projector((int)(6 * i + 0), neuriteProj);
 			projHandler.set_projector((int)(6 * i + 1), neuriteProj);
-			projHandler.set_projector((int)(6 * i + 2), neuriteProj);
+			if (!linearHexBasolateral)
+				projHandler.set_projector((int)(6 * i + 2), neuriteProj);
 			projHandler.set_projector((int)(6 * i + 3), neuriteProj);
 			// Terminal cap refinement must also propagate npSurfParams.  Leaving
 			// Inlet/Outlet on the default linear projector creates cap midpoint
@@ -8583,10 +8602,11 @@ static void import_er_neurites_from_swc_impl
 		dynamic_cast<ProjectionHandler*>(dom.refinement_projector().get());
 	UG_COND_THROW(!loadedProjectionHandler,
 	              "Loaded nephron domain has no ProjectionHandler.");
+	const int loadedProjectorSubset = linearHexBasolateral ? 3 : 2;
 	NeuriteProjector* loadedNeuriteProjector = dynamic_cast<NeuriteProjector*>(
-		loadedProjectionHandler->projector(2).get());
+		loadedProjectionHandler->projector(loadedProjectorSubset).get());
 	UG_COND_THROW(!loadedNeuriteProjector,
-	              "Loaded Basolateral subset has no NeuriteProjector.");
+	              "Loaded nephron projection subset has no NeuriteProjector.");
 
 	SmartPtr<IRefiner> ref;
 	HangingNodeRefiner_MultiGrid* crossRef = NULL;

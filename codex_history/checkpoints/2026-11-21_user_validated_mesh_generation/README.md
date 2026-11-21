@@ -28,12 +28,18 @@ The hybrid Inter topology uses prisms near the nephron, conforming
 pyramid/tetrahedron transition cells, and tetrahedra in the far Inter domain.
 Hexahedra remain in the structured Lumen/Membrane O-grid.
 
+On branch `feature/inter-hexahedra`, `-interMesh hex` is also available. It
+uses hexahedra in the structured near-Inter region and the same conforming
+pyramid/tetrahedron transition. The default remains `prism`. See
+`docs/INTER_HEXAHEDRA_VALIDATION_2026-11-21.md` for the R0--R2 validation and
+the hex-specific refinement policy.
+
 ## Active source hashes
 
-- `neurites_from_swc.cpp`: `a7ad698f583b510e26144a63f2d118e061c4614cc31d968089f6ed491d362d8e`
+- `neurites_from_swc.cpp`: `3f952716a4795d68c2ae88644448e11fd4cb09285029798a3c0913f6fef1a10e`
 - `neurites_from_swc.h`: `0571c8966524fad903588fd71d1ef413d95f5ada4cc8549bed1e148ebb3ff60d`
 - `neuro_collection_plugin.cpp`: `b91de5744b4306986e8dd2d0586997606d90871fd20449599051acff8f123fda`
-- `swc_to_neurite_projector_nephron_final_pipeline.lua`: `6aa28605660dfe935c3eab5176039f63a81476f2e0d7e80cac22bc9d26646b41`
+- `swc_to_neurite_projector_nephron_final_pipeline.lua`: `e54a655280c41147fc3ae545990d366ac13e59f3765045f657cd7000b9e966cb`
 - `quadratic_interpolate_swc.py`: `fac0831fcd8b50847bbd4f06412aa4e97faa91eaa744fc5e4406e5675e01426e`
 - `extend_swc_terminals_to_outerwall.py`: `aaab2a5c3302f9ab664a9e0fcf575714bba8c6793559baf62c9a1948290b7477`
 - `validate_ugx_mesh.py`: `a781042b0f533c6e75fd93e7b736eddb4f23ab8dd852fea0b8180669dcc03e62`

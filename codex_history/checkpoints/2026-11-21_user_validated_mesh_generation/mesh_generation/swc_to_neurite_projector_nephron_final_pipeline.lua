@@ -357,8 +357,8 @@ assert(cfg.interFarEdgeFactor >= cfg.interNearEdgeFactor,
 assert(cfg.interNearDistanceFactor >= 0.0
 	and cfg.interFarDistanceFactor > cfg.interNearDistanceFactor,
 	"Inter distance factors require 0 <= near < far")
-assert(cfg.interMesh == "tet" or cfg.interMesh == "prism",
-	"-interMesh must be 'tet' or 'prism'")
+assert(cfg.interMesh == "hex" or cfg.interMesh == "prism",
+	"-interMesh must be 'hex' or 'prism'")
 assert(cfg.ogrid >= 4, "ogrid must be an integer >= 4")
 assert_positive("padding", cfg.padding)
 assert_positive("paddingX", cfg.paddingX)
@@ -528,7 +528,7 @@ print("Graded Inter: " .. tostring(cfg.gradedInter) .. ", edge factors "
 	.. ", distance factors " .. cfg.interNearDistanceFactor .. " -> "
 	.. cfg.interFarDistanceFactor)
 print("Inter mesh topology: " .. cfg.interMesh)
-print("Curved prismatic Inter thickness (um): " .. cfg.prismInterThickness)
+print("Structured near-Inter thickness (um): " .. cfg.prismInterThickness)
 print("Geometry policy: coordinate/containment/parameter tolerances "
 	.. cfg.coordinateRelTol .. " / " .. cfg.containmentRelTol .. " / "
 	.. cfg.parameterTol .. "; merge/radius=" .. cfg.mergeRadiusFactor
