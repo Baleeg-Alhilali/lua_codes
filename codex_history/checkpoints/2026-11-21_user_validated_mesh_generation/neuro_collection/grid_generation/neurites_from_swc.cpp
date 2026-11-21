@@ -5514,6 +5514,52 @@ static void add_straight_prismatic_inter_to_version2_nephron
 		sh.set_subset_name("Apical", 3);
 		sh.set_subset_name("OuterWall", 4);
 		sh.set_subset_name("Inter", 5);
+		if (!g_adaptiveNephronMeshing.prismaticInter)
+		{
+			// Hex refinement must use one coherent parametric map on the complete
+			// structured near-field closure.  Assigning only vertices and volumes
+			// leaves edge midpoints and face centers linear while the volume center
+			// is projected, which folds refined children.  Include every associated
+			// edge and face so all new nodes interpolate the same axial/angular/
+			// radial coordinates.
+			std::set<Vertex*> structuredVertices;
+			for (size_t i = 0; i < interNearVolumes.size(); ++i)
+			{
+				Volume* volume = interNearVolumes[i];
+				if (volume->reference_object_id() != ROID_HEXAHEDRON)
+					continue;
+				psh.assign_subset(volume, 0);
+				Grid::traits<Face>::secure_container faces;
+				g.associated_elements(faces, volume);
+				for (size_t f = 0; f < faces.size(); ++f)
+				{
+					psh.assign_subset(faces[f], 0);
+					Grid::traits<Edge>::secure_container edges;
+					g.associated_elements(edges, faces[f]);
+					for (size_t e = 0; e < edges.size(); ++e)
+						psh.assign_subset(edges[e], 0);
+					for (size_t v = 0; v < faces[f]->num_vertices(); ++v)
+					{
+						psh.assign_subset(faces[f]->vertex(v), 0);
+						structuredVertices.insert(faces[f]->vertex(v));
+					}
+				}
+			}
+			// Transition cells were initially tagged with the near-field projector
+			// for the prism implementation.  In the hex implementation only their
+			// shared inner face belongs to the structured closure; keep their volume
+			// centers and all exclusive vertices linear.
+			for (size_t i = 0; i < interNearVolumes.size(); ++i)
+			{
+				Volume* volume = interNearVolumes[i];
+				if (volume->reference_object_id() == ROID_HEXAHEDRON)
+					continue;
+				psh.assign_subset(volume, 1);
+				for (size_t v = 0; v < volume->num_vertices(); ++v)
+					if (!structuredVertices.count(volume->vertex(v)))
+						psh.assign_subset(volume->vertex(v), 1);
+			}
+		}
 		UG_LOGN("Added hybrid conforming "
 		        << (g_adaptiveNephronMeshing.prismaticInter ? "prismatic" : "hexahedral")
 		        << " Inter: axial stations="
@@ -8447,23 +8493,26 @@ static void import_er_neurites_from_swc_impl
 	SubsetHandler psh(g);
 	psh.set_default_subset_index(0);
 
-	// Combined nephron/Inter grids serialize the projector against defSH.
-	// The prism path projects both biological interfaces.  Standard hex
-	// subdivision cannot safely curve only the Basolateral face: one child of
-	// every swept Inter hex folds.  The hex option therefore keeps Basolateral
-	// and Inter linear while retaining exact Apical projection for the lumen.
-	const bool linearHexBasolateral =
+	// Prism meshes project their biological interfaces through defSH.  Hex
+	// meshes project the complete structured tube/near-Inter closure through
+	// projSH subset 0; the far tetrahedral box remains linear in subset 1.
+	const bool projectHexInterLayers =
 		fillInter && !g_adaptiveNephronMeshing.prismaticInter;
-	ProjectionHandler projHandler(fillInter ? &sh : &psh);
+	ProjectionHandler projHandler(projectHexInterLayers ? &psh
+	                                                   : (fillInter ? &sh : &psh));
 	SmartPtr<IGeometry<3> > geom3d = MakeGeometry3d(g, aPosition);
 	projHandler.set_geometry(geom3d);
 
 	SmartPtr<NeuriteProjector> neuriteProj(new NeuriteProjector(geom3d));
 	if (fillInter && indexedNephrons == 0)
 	{
-		if (!linearHexBasolateral)
+		if (projectHexInterLayers)
+			projHandler.set_projector(0, neuriteProj); // tube + swept Inter
+		else
+		{
 			projHandler.set_projector(2, neuriteProj); // Basolateral
-		projHandler.set_projector(3, neuriteProj); // Apical
+			projHandler.set_projector(3, neuriteProj); // Apical
+		}
 	}
 	else if (!fillInter)
 		projHandler.set_projector(0, neuriteProj);
@@ -8526,15 +8575,16 @@ static void import_er_neurites_from_swc_impl
 		// far-box vertices do not carry neurite coordinates and would collapse onto
 		// the trace. Basolateral and the structured nephron subsets below retain the
 		// exact projector; the conforming exterior layers refine linearly from them.
-		for (size_t i = 0; i < indexedNephrons; ++i)
+		if (projectHexInterLayers)
+			projHandler.set_projector(0, neuriteProj);
+		for (size_t i = 0; i < indexedNephrons && !projectHexInterLayers; ++i)
 		{
 			// Use the same exact neurite map for the internal radial layers as for
 			// Apical and Basolateral. Moving only the two interfaces leaves their
 			// supporting Lumen/Membrane vertices on straight chords.
 			projHandler.set_projector((int)(6 * i + 0), neuriteProj);
 			projHandler.set_projector((int)(6 * i + 1), neuriteProj);
-			if (!linearHexBasolateral)
-				projHandler.set_projector((int)(6 * i + 2), neuriteProj);
+			projHandler.set_projector((int)(6 * i + 2), neuriteProj);
 			projHandler.set_projector((int)(6 * i + 3), neuriteProj);
 			// Terminal cap refinement must also propagate npSurfParams.  Leaving
 			// Inlet/Outlet on the default linear projector creates cap midpoint
@@ -8602,7 +8652,7 @@ static void import_er_neurites_from_swc_impl
 		dynamic_cast<ProjectionHandler*>(dom.refinement_projector().get());
 	UG_COND_THROW(!loadedProjectionHandler,
 	              "Loaded nephron domain has no ProjectionHandler.");
-	const int loadedProjectorSubset = linearHexBasolateral ? 3 : 2;
+	const int loadedProjectorSubset = projectHexInterLayers ? 0 : 2;
 	NeuriteProjector* loadedNeuriteProjector = dynamic_cast<NeuriteProjector*>(
 		loadedProjectionHandler->projector(loadedProjectorSubset).get());
 	UG_COND_THROW(!loadedNeuriteProjector,
@@ -8635,13 +8685,17 @@ static void import_er_neurites_from_swc_impl
 		// Subdivide the already fitted level-1 geometry linearly from level 2 on;
 		// this retains the curved r1 surface, exact shared topology, and positive
 		// child Jacobians.
-		if (i > 0 && !crossSectionRefinement)
+		if (i > 0 && !crossSectionRefinement
+		    && g_adaptiveNephronMeshing.prismaticInter)
 		{
 			ref->set_projector(SPNULL);
 			UG_LOGN("Refinement level " << i + 1
 			        << ": using linear subdivision of the projector-fitted level "
 			        << i << " geometry.");
 		}
+		else if (i > 0 && !crossSectionRefinement)
+			UG_LOGN("Refinement level " << i + 1
+			        << ": retaining coherent tube/near-Inter hex projection.");
 		std::set<Edge*> transverseEdges;
 		std::set<Edge*> axialEdges;
 		std::map<uint32, std::vector<number> > allowedAxialSections;

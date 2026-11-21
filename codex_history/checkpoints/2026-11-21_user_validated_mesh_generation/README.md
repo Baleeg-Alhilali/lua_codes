@@ -36,7 +36,7 @@ the hex-specific refinement policy.
 
 ## Active source hashes
 
-- `neurites_from_swc.cpp`: `3f952716a4795d68c2ae88644448e11fd4cb09285029798a3c0913f6fef1a10e`
+- `neurites_from_swc.cpp`: `e8f3b33f52a7f6556d15992977bf298f9e47b6c4153febf7976f4583bfe4df4b`
 - `neurites_from_swc.h`: `0571c8966524fad903588fd71d1ef413d95f5ada4cc8549bed1e148ebb3ff60d`
 - `neuro_collection_plugin.cpp`: `b91de5744b4306986e8dd2d0586997606d90871fd20449599051acff8f123fda`
 - `swc_to_neurite_projector_nephron_final_pipeline.lua`: `e54a655280c41147fc3ae545990d366ac13e59f3765045f657cd7000b9e966cb`
