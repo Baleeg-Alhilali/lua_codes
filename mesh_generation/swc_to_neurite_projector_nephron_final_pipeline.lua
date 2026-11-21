@@ -14,7 +14,7 @@ ChangeDirectory(GENERATION_DIR)
 -- Build a projector-backed neurite surface directly from the specified SWC tree.
 --
 -- This is a copy of swc_to_neurite_projector.lua tailored to the
--- Nephron traces dataset and a fixed radius of 1.0.
+-- Nephron traces dataset with the verified third_trace_generalized2 defaults.
 
 ug_load_script("ug_util.lua")
 AssertPluginsLoaded({"neuro_collection", "ProMesh"})
@@ -27,7 +27,7 @@ local script_dir = GENERATION_DIR
 local cfg = {}
 -- SWC coordinates and CLI lengths are in um; UGX/projector coordinates are mm.
 local MESH_LENGTH_SCALE = 1e-3
-cfg.swc = util.GetParam("-swc", MODEL_ROOT .. "/Nephron traces/3rd_trace_243.swc")
+cfg.swc = util.GetParam("-swc", MODEL_ROOT .. "/Nephron traces/3rd_trace_243_third.swc")
 local input_name = cfg.swc:match("([^/]+)$") or cfg.swc
 local input_stem = input_name:gsub("%.[^%.]+$", "")
 cfg.out = util.GetParam("-out", MODEL_ROOT .. "/runs/" .. input_stem .. ".ugx")
@@ -41,11 +41,11 @@ cfg.extendTerminals = util.GetParamNumber("-extendTerminals", 1) ~= 0
 cfg.useTraceEndpoints = util.GetParamNumber("-useTraceEndpoints", 0) ~= 0
 cfg.terminalExtender = util.GetParam("-terminalExtender",
 	script_dir .. "/extend_swc_terminals_to_outerwall.py")
-cfg.terminalPaddingFactor = util.GetParamNumber("-terminalPaddingFactor", 25.0)
+cfg.terminalPaddingFactor = util.GetParamNumber("-terminalPaddingFactor", 0.0)
 -- Scale the centerline independently from its tube radii.  This is required
 -- when a requested outer radius is too large for the curvature/clearance of
 -- the original trace.  A value of 1 preserves the measured centerline.
-cfg.centerlineScale = util.GetParamNumber("-centerlineScale", 1.0)
+cfg.centerlineScale = util.GetParamNumber("-centerlineScale", 24.0)
 cfg.smoothOrder = math.floor(util.GetParamNumber("-smoothOrder", 3))
 cfg.samplesPerCorner = math.floor(util.GetParamNumber("-samplesPerCorner", 30))
 -- Cubic interpolation can reintroduce 20--25 degree turns even after the raw
@@ -54,19 +54,17 @@ cfg.samplesPerCorner = math.floor(util.GetParamNumber("-samplesPerCorner", 30))
 cfg.preSmoothAngle = util.GetParamNumber("-preSmoothAngle", 10.0)
 cfg.preSmoothStrength = util.GetParamNumber("-preSmoothStrength", 0.85)
 cfg.preSmoothPasses = math.floor(util.GetParamNumber("-preSmoothPasses", 50))
-cfg.radius = util.GetParamNumber("-radius", 1.0)
-cfg.membraneThickness = util.GetParamNumber("-membraneThickness", 0.2)
+cfg.radius = util.GetParamNumber("-radius", 10.0)
+cfg.membraneThickness = util.GetParamNumber("-membraneThickness", 10.0)
 local requested_outer_radius = cfg.radius + cfg.membraneThickness
 -- Smoothing operates on the original SWC coordinates.  Keep its sampling tied
 -- to that source trace; centerlineScale is applied afterwards.
 cfg.resampleSpacing = util.GetParamNumber(
-	"-resampleSpacing", 0.5)
+	"-resampleSpacing", 5.0)
 -- Terminal-extension samples may be coarser for a large tube.  This avoids
 -- thousands of nearly redundant spline sections while retaining the verified
 -- 0.5 um spacing for the 1.0/0.2 um reference geometry.
-cfg.terminalSpacing = util.GetParamNumber("-terminalSpacing",
-	math.max(cfg.resampleSpacing * cfg.centerlineScale,
-		0.25 * requested_outer_radius))
+cfg.terminalSpacing = util.GetParamNumber("-terminalSpacing", 20.0)
 cfg.skipGeometryPreflight = util.GetParamNumber("-skipGeometryPreflight", 0) ~= 0
 -- Keep long axial cells only where the spline is nearly straight. Around
 -- bends, recursively add stations until the axial/circumferential ratio is
@@ -74,7 +72,7 @@ cfg.skipGeometryPreflight = util.GetParamNumber("-skipGeometryPreflight", 0) ~= 
 cfg.anisotropy = util.GetParamNumber("-anisotropy", 4.0)
 cfg.adaptiveAnisotropy = util.GetParamNumber("-adaptiveAnisotropy", 1) ~= 0
 cfg.bendAnisotropy = util.GetParamNumber("-bendAnisotropy", 1.0)
-cfg.bendChordErrorFactor = util.GetParamNumber("-bendChordErrorFactor", 0.02)
+cfg.bendChordErrorFactor = util.GetParamNumber("-bendChordErrorFactor", 0.01)
 -- Grade Inter from the Basolateral surface into the outer box. Every factor
 -- is relative to the Basolateral boundary-edge scale, not a fixed length.
 cfg.gradedInter = util.GetParamNumber("-gradedInter", 1) ~= 0
@@ -82,7 +80,7 @@ cfg.interNearEdgeFactor = util.GetParamNumber("-interNearEdgeFactor", 2.0)
 cfg.interNearDistanceFactor = util.GetParamNumber("-interNearDistanceFactor", 1.5)
 cfg.interFarDistanceFactor = util.GetParamNumber("-interFarDistanceFactor", 6.0)
 cfg.interFarEdgeFactor = util.GetParamNumber("-interFarEdgeFactor", 6.0)
-cfg.interMesh = util.GetParam("-interMesh", "tet")
+cfg.interMesh = util.GetParam("-interMesh", "prism")
 cfg.ogrid = math.floor(util.GetParamNumber("-ogrid", 10))
 -- Keep one lumen-midpoint support ring between the center and Apical ring.
 -- Removing it makes projected cross-sectional refinement connect large child
@@ -93,7 +91,7 @@ cfg.coarseLumenCenterOnly = util.GetParamNumber("-coarseLumenCenterOnly", 0) ~= 
 -- inspection meshes _refined_1.ugx through _refined_N.ugx.  The flow solver
 -- loads the coarse projector-backed UGX and builds its multigrid hierarchy in
 -- memory. Cross-sectional-only refinement remains experimental (-crossOnly 1).
-cfg.numRefs = math.floor(util.GetParamNumber("-numRefs", 0))
+cfg.numRefs = math.floor(util.GetParamNumber("-numRefs", 2))
 cfg.crossOnly = util.GetParamNumber("-crossOnly", 0) ~= 0
 -- Treat structural validation as part of mesh generation, not as an optional
 -- solver-debugging step.  This may be disabled only for special diagnostic
@@ -101,15 +99,14 @@ cfg.crossOnly = util.GetParamNumber("-crossOnly", 0) ~= 0
 cfg.validate = util.GetParamNumber("-validate", 1) ~= 0
 cfg.validator = util.GetParam("-validator", script_dir .. "/validate_ugx_mesh.py")
 -- The non-terminal box clearance is tied both to the centerline and tube.
-cfg.padding = util.GetParamNumber("-padding",
-	math.max(10.0 * cfg.centerlineScale, 2.0 * requested_outer_radius))
+cfg.padding = util.GetParamNumber("-padding", 200.0)
 -- Axis-specific clearances inherit the common padding unless overridden.
 -- They control the fixed box metadata created by the terminal extender.
 cfg.paddingX = util.GetParamNumber("-paddingX", cfg.padding)
 cfg.paddingY = util.GetParamNumber("-paddingY", cfg.padding)
 cfg.paddingZ = util.GetParamNumber("-paddingZ", cfg.padding)
 cfg.prismInterThickness = util.GetParamNumber(
-	"-prismInterThickness", cfg.padding)
+	"-prismInterThickness", 20.0)
 cfg.interQuality = util.GetParamNumber("-interQuality", 2.0)
 -- Dimensionless geometry policy. Physical tolerances are derived in C++ from
 -- the local tube radius, Basolateral edge length, or box-cell size and are
