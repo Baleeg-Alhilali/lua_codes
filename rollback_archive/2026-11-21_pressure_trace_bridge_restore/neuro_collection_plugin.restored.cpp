@@ -1048,7 +1048,9 @@ static void Common(Registry& reg, string grp)
 	// neurites from swc
 	{
 		reg.add_function("configure_adaptive_nephron_meshing", &neurites_from_swc::configure_adaptive_nephron_meshing, "",
-			"curvature-limited anisotropy # minimum bend anisotropy # bend chord-error/radius # graded Inter # near edge factor # near distance factor # far distance factor # far edge factor # prismatic Inter", "");
+			"curvature-limited anisotropy # minimum bend anisotropy # bend chord-error/radius # graded Inter # near edge factor # near distance factor # far distance factor # far edge factor # prismatic Inter # curved prismatic Inter thickness", "");
+		reg.add_function("configure_nephron_geometry_policy", &neurites_from_swc::configure_nephron_geometry_policy, "",
+			"coordinate relative tolerance # containment relative tolerance # parameter tolerance # merge/radius factor # terminal snap/radius factor # straightness/radius factor # angular-spacing tolerance factor # minimum Inter layers # maximum Inter layers # Inter layers per surface-edge length # radial growth exponent", "");
 		reg.add_function("import_neurites_from_swc", &neurites_from_swc::import_neurites_from_swc, "",
 			"file name # anisotropy # refinements", "");
 		reg.add_function("import_neurites_with_box_from_swc", &neurites_from_swc::import_neurites_with_box_from_swc, "",
