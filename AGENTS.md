@@ -91,6 +91,15 @@ not necessarily the present working tree.
 
 ## Flow, Darcy, and transport
 
+- When starting a simulation, inspect only the first few steps to confirm that
+  assembly is finite, the solver is converging, and no timestep retries or
+  immediate physical failures occur.  After that initial gate, leave the run
+  undisturbed until it completes.  For a long run, check its progress no more
+  frequently than about every four minutes, then perform the full algebraic,
+  physical, and output checks after completion.  Monitor more closely only
+  when a specific warning, instability, retry, or other concrete risk makes it
+  necessary.
+
 - For new or substantially edited flow Lua scripts, follow
   `code/flow/FLOW_SCRIPT_STRUCTURE.md`: summary, dependencies, parameters,
   discretization/boundaries, mesh/space, solver, time/initial values, output.
@@ -236,6 +245,9 @@ top-level `.pvtu` dataset rather than its individual partition `.vtu` files.
 For coupled Stokes--Darcy tests, "every relevant result dataset" explicitly
 means opening the Lumen, Membrane, and Inter compartment datasets together;
 never open only the Lumen result after a completed test.
+Always launch the compartment `.pvtu` files in ParaView, never their `.pvd`
+time-series collection files. When no time step is specified, open the final
+available `.pvtu` for Lumen, Membrane, and Inter together.
 Use clear short dataset names that identify the model, field or compartment,
 and refinement when needed; avoid long experimental-history strings. Do not
 present or automatically open a merely algebraically converged result as a

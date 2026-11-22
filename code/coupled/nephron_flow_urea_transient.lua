@@ -20,8 +20,20 @@ local MODEL_ROOT = assert(scriptPath:match("^(.*)/code/.*$"),
     "Expected this script below Model/code: " .. scriptPath)
 ChangeDirectory(MODEL_ROOT)
 
--- This script leaves the solved domain, flow solution, pressure scaling and
--- flow equation objects available for the transient transport block below.
+-- velocity_ip() is a dependent FV1 export: the flow and concentration fields
+-- must live in the same approximation space so it receives the element-local
+-- velocity and pressure values during transport assembly.
+flowExtraApproximationFunctions = {
+    {name = "urea_lumen",
+     subsets = "Lumen,Apical,Inlet,Outlet,TripleJunction"},
+    {name = "urea_membrane",
+     subsets = "Membrane,Apical,Basolateral,MembraneWall,TripleJunction"},
+    {name = "urea_inter",
+     subsets = "Inter,Basolateral,OuterWall"},
+}
+
+-- This script leaves the solved domain, mixed approximation space, flow
+-- solution, pressure scaling and flow equation objects available below.
 ug_load_script("code/flow/nephron_stokes_darcy_clean.lua")
 
 --------------------------------------------------------------------------------
@@ -35,9 +47,9 @@ local diffusion = util.GetParamNumber("-diffusion", 1.67e-3) -- mm^2/s
 local initialLumenConcentration = util.GetParamNumber("-initial", 1.0)
 local inletConcentration = util.GetParamNumber("-inletConcentration", 1.0)
 local apicalPermeability = util.GetParamNumber(
-    "-apicalPermeability", 3.78e-4)       -- mm/s
+    "-apicalPermeability", 3.78e-3)       -- mm/s (10x baseline)
 local basolateralPermeability = util.GetParamNumber(
-    "-basolateralPermeability", 3.70e-4)  -- mm/s
+    "-basolateralPermeability", 3.70e-3)  -- mm/s (10x baseline)
 local membraneTransportDensity = util.GetParamNumber(
     "-membraneTransportDensity", 1.0)
 local transportOutputPrefix = outputName .. "_urea"
@@ -63,14 +75,20 @@ print(string.format("Time step: %.17g s", dt))
 print(string.format("Initial lumen concentration: %.17g",
                     initialLumenConcentration))
 print(string.format("Inlet concentration: %.17g", inletConcentration))
+print(string.format("Apical leak permeability: %.17g mm/s",
+                    apicalPermeability))
+print(string.format("Basolateral leak permeability: %.17g mm/s",
+                    basolateralPermeability))
 
 --------------------------------------------------------------------------------
--- Frozen flow coefficients and transport approximation space
+-- Native conservative FV1 velocity exports
 --------------------------------------------------------------------------------
 
-local solvedStokesVelocity = ExplicitGridFunctionVector(solution, "u,v,w")
-local solvedScaledDarcyGradient = ExplicitGridFunctionGradient(
-    solution, "p_darcy_scaled")
+-- At lumen SCVF integration points this returns the pressure-stabilized
+-- velocity used by NavierStokesFV1 itself.  The plugin introduced this export
+-- specifically to provide a discretely divergence-free transport velocity.
+local transportStokesVelocity = stokesEq:velocity_ip()
+local outputStokesVelocity = stokesEq:velocity()
 
 local transportMembraneVelocity = DarcyVelocityLinker()
 transportMembraneVelocity:set_permeability(
@@ -78,29 +96,16 @@ transportMembraneVelocity:set_permeability(
 transportMembraneVelocity:set_viscosity(kinematicViscosity)
 transportMembraneVelocity:set_density(1.0)
 transportMembraneVelocity:set_gravity(ConstUserVector(0.0))
-transportMembraneVelocity:set_pressure_gradient(solvedScaledDarcyGradient)
+transportMembraneVelocity:set_pressure_gradient(darcyMembraneEq:gradient())
 
 local transportInterVelocity = DarcyVelocityLinker()
 transportInterVelocity:set_permeability(interPermeability * pressureScale)
 transportInterVelocity:set_viscosity(kinematicViscosity)
 transportInterVelocity:set_density(1.0)
 transportInterVelocity:set_gravity(ConstUserVector(0.0))
-transportInterVelocity:set_pressure_gradient(solvedScaledDarcyGradient)
+transportInterVelocity:set_pressure_gradient(darcyInterEq:gradient())
 
-transportSpace = ApproximationSpace(dom)
-transportSpace:add_fct(
-    "urea_lumen", "Lagrange", 1,
-    "Lumen,Apical,Inlet,Outlet,TripleJunction")
-transportSpace:add_fct(
-    "urea_membrane", "Lagrange", 1,
-    "Membrane,Apical,Basolateral,MembraneWall,TripleJunction")
--- TripleJunction does not touch an Inter volume on generalized3.  Excluding it
--- avoids the empty shadow rows that make a nonzero interface leak singular.
-transportSpace:add_fct(
-    "urea_inter", "Lagrange", 1,
-    "Inter,Basolateral,OuterWall")
-transportSpace:init_levels()
-transportSpace:init_top_surface()
+transportSpace = approxSpace
 transportSpace:print_statistic("component")
 
 --------------------------------------------------------------------------------
@@ -109,9 +114,39 @@ transportSpace:print_statistic("component")
 
 transportDisc = DomainDiscretization(transportSpace)
 
+-- Quasi-steady flow block.  These equations have no time mass, so the same
+-- steady Stokes--Darcy state is enforced at every transport time level.
+transportDisc:add(stokesEq)
+transportDisc:add(stokesInlet)
+transportDisc:add(stokesOpenBoundary)
+transportDisc:add(stokesRim)
+transportDisc:add(stokesBJS)
+transportDisc:add(darcyMembraneEq)
+transportDisc:add(darcyInterEq)
+transportDisc:add(pressureTrace)
+transportDisc:add(darcyOuterPressure)
+transportDisc:add(inactiveDarcy)
+transportDisc:add(inactiveStokes)
+
+for _, component in ipairs({
+    {"u", util.CreateConstUserVector3d(1.0, 0.0, 0.0)},
+    {"v", util.CreateConstUserVector3d(0.0, 1.0, 0.0)},
+    {"w", util.CreateConstUserVector3d(0.0, 0.0, 1.0)}
+}) do
+    local coupledInterfaceTraction = NeumannBoundary(component[1], "fv1")
+    coupledInterfaceTraction:add(
+        darcyPressure * component[2], "Apical", "Lumen")
+    transportDisc:add(coupledInterfaceTraction)
+
+    local coupledOutletTraction = NeumannBoundary(component[1], "fv1")
+    coupledOutletTraction:add(
+        outletKinematicPressure * component[2], "Outlet", "Lumen")
+    transportDisc:add(coupledOutletTraction)
+end
+
 local lumenTransport = ConvectionDiffusionFV1("urea_lumen", "Lumen")
 lumenTransport:set_diffusion(diffusion)
-lumenTransport:set_velocity(solvedStokesVelocity)
+lumenTransport:set_velocity(transportStokesVelocity)
 lumenTransport:set_upwind(FullUpwind())
 transportDisc:add(lumenTransport)
 
@@ -141,13 +176,25 @@ local basolateralTransport = MembraneTransportFV1(
 basolateralTransport:set_density_function(membraneTransportDensity)
 transportDisc:add(basolateralTransport)
 
+-- ConvectionDiffusionFV1 supplies internal SCVF convection but not the open
+-- boundary term.  NeumannBoundary accepts a vector flux and contracts it with
+-- the boundary normal, so this adds exactly c*u.n at the Outlet.  Unlike the
+-- former mean-speed Leak approximation, it retains the solved outlet profile.
+local outletConcentrationFlux = ScaleAddLinkerVector()
+outletConcentrationFlux:add(
+    lumenTransport:value(), transportStokesVelocity)
+local outletAdvection = NeumannBoundary("urea_lumen", "fv1")
+outletAdvection:add(
+    outletConcentrationFlux, "Outlet", "Lumen")
+transportDisc:add(outletAdvection)
+
 local concentrationBoundary = DirichletBoundary()
 concentrationBoundary:add(
     inletConcentration, "urea_lumen", "Inlet")
 transportDisc:add(concentrationBoundary)
 transportDisc:add(OneSideP1Constraints())
 
-transportSolution = GridFunction(transportSpace)
+transportSolution = solution:clone()
 Interpolate(initialLumenConcentration, transportSolution, "urea_lumen")
 Interpolate(0.0, transportSolution, "urea_membrane")
 Interpolate(0.0, transportSolution, "urea_inter")
@@ -168,8 +215,8 @@ util.solver.defaults.approxSpace = transportSpace
 local transportSolverConfig = {
     type = "newton",
     convCheck = {
-        type = "standard", iterations = 6,
-        absolute = 1.0e-14, reduction = 1.0e-10, verbose = true
+        type = "standard", iterations = 8,
+        absolute = 1.0e-11, reduction = 1.0e-8, verbose = true
     },
     linSolver = {
         type = "bicgstab",
@@ -183,8 +230,10 @@ local transportSolverConfig = {
             rap = true, transfer = "std", baseSolver = "superlu"
         },
         convCheck = {
-            type = "standard", iterations = 200,
-            absolute = 1.0e-14, reduction = 1.0e-10, verbose = true
+            -- MPI reductions reach a roundoff floor above the serial target;
+            -- 1e-12 remains one order tighter than the Newton acceptance test.
+            type = "standard", iterations = 250,
+            absolute = 1.0e-12, reduction = 1.0e-9, verbose = true
         }
     }
 }
@@ -198,7 +247,7 @@ local outputTimes = {}
 local lastOutputStep = 0
 local compartmentOutputs = {
     {name = "lumen", subset = "Lumen", field = "urea_lumen",
-     velocity = solvedStokesVelocity, writer = VTKOutput()},
+     velocity = transportStokesVelocity, writer = VTKOutput()},
     {name = "membrane", subset = "Membrane", field = "urea_membrane",
      velocity = transportMembraneVelocity, writer = VTKOutput()},
     {name = "inter", subset = "Inter", field = "urea_inter",
@@ -241,17 +290,6 @@ local function writeSinglePiecePVTU(prefix, step, time)
     file:close()
 end
 
-local function writeCompartmentVTK(currentSolution, step, time)
-    for _, compartment in ipairs(compartmentOutputs) do
-        local prefix = transportOutputPrefix .. "_" .. compartment.name
-        compartment.writer:print_subsets(
-            prefix, currentSolution, compartment.subset, step, time)
-        writeSinglePiecePVTU(prefix, step, time)
-    end
-    outputTimes[step] = time
-    if step > lastOutputStep then lastOutputStep = step end
-end
-
 local function writeCompartmentPVD(prefix)
     if ProcRank() ~= 0 then return end
     local file = assert(io.open(prefix .. ".pvd", "w"),
@@ -272,6 +310,24 @@ local function writeCompartmentPVD(prefix)
     file:write('  </Collection>\n')
     file:write('</VTKFile>\n')
     file:close()
+end
+
+local function writeCompartmentVTK(currentSolution, step, time)
+    for _, compartment in ipairs(compartmentOutputs) do
+        local prefix = transportOutputPrefix .. "_" .. compartment.name
+        compartment.writer:print_subsets(
+            prefix, currentSolution, compartment.subset, step, time)
+        writeSinglePiecePVTU(prefix, step, time)
+    end
+    outputTimes[step] = time
+    if step > lastOutputStep then lastOutputStep = step end
+
+    -- Keep each ParaView collection valid throughout a long run instead of
+    -- creating it only after the final time step.
+    for _, compartment in ipairs(compartmentOutputs) do
+        writeCompartmentPVD(
+            transportOutputPrefix .. "_" .. compartment.name)
+    end
 end
 
 writeCompartmentVTK(transportSolution, 0, 0.0)

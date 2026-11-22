@@ -37,21 +37,27 @@ def concentration_values(files: list[Path]) -> list[float]:
 
 
 def compartment_series(prefix: Path, compartment: str) -> tuple[list[float], list[float], int]:
-    """Read the first and last VTU referenced by a compartment PVD/PVTU series."""
+    """Read first/last serial or MPI pieces in a compartment PVD series."""
     pvd_path = Path(f"{prefix}_{compartment}.pvd")
     datasets = list(ET.parse(pvd_path).getroot().iter("DataSet"))
     if not datasets:
         raise ValueError(f"No time steps in {pvd_path}")
 
-    def referenced_vtu(dataset: ET.Element) -> Path:
+    def referenced_vtus(dataset: ET.Element) -> list[Path]:
         pvtu_path = pvd_path.parent / dataset.attrib["file"]
         pieces = list(ET.parse(pvtu_path).getroot().iter("Piece"))
-        if len(pieces) != 1:
-            raise ValueError(f"Expected one serial piece in {pvtu_path}")
-        return pvtu_path.parent / pieces[0].attrib["Source"]
+        if not pieces:
+            raise ValueError(f"No pieces referenced by {pvtu_path}")
+        paths = [pvtu_path.parent / piece.attrib["Source"] for piece in pieces]
+        missing = [path for path in paths if not path.is_file()]
+        if missing:
+            raise ValueError(
+                f"{pvtu_path} references missing pieces: "
+                + ", ".join(map(str, missing)))
+        return paths
 
-    initial = concentration_values([referenced_vtu(datasets[0])])
-    final = concentration_values([referenced_vtu(datasets[-1])])
+    initial = concentration_values(referenced_vtus(datasets[0]))
+    final = concentration_values(referenced_vtus(datasets[-1]))
     return initial, final, len(datasets)
 
 

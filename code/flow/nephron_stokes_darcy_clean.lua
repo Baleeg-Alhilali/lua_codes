@@ -19,7 +19,8 @@ ug_load_script("util/load_balancing_util.lua")
 dim = 3
 
 numRefs = util.GetParamNumber("-numRefs", 2, "number of refinements")
-gridName = "runs/third_trace_generalized3.ugx"
+gridName = "runs/third_trace_mesh_hex.ugx"
+-- Previous mesh: gridName = "runs/third_trace_restored_t3.ugx"
 outputName = util.GetParam(
     "-output", "Results_final/nephron_flow_r" .. numRefs,
     "VTK output prefix"
@@ -29,20 +30,27 @@ outputName = util.GetParam(
 -- Velocity: mm/s; kinematic pressure: mm^2/s^2; permeability: mm^2.
 
 -- Inlet geometry and velocity
-inletCenterX = 7.756431860742936
-inletCenterY = 11.346429056849605
-inletCenterZ = 5.583
+inletCenterX = 7.757994361
+inletCenterY = 11.344866557
+inletCenterZ = 5.588
 inletDirectionX = 0.0
 inletDirectionY = 0.0
 inletDirectionZ = 1.0
-inletRadius = 1.5e-2
+inletRadius = 1.0e-2
 maximumInletVelocity = 3.0
+
+-- Previous third_trace_restored_t3.ugx inlet:
+-- center = (7.82522082, 11.24569434, 5.583) mm
+-- direction = (0.0, 0.0, 1.0), radius = 1.5e-2 mm
 
 -- Fluid and porous-medium parameters
 kinematicViscosity = 1.0                  -- [mm^2/s]
-membranePermeability = 1.0e-13            -- [mm^2]
-interPermeability = 1.0e-11               -- [mm^2]
-bjsPermeability = 1.0e-13                 -- [mm^2]
+membranePermeability = util.GetParamNumber(
+    "-membranePermeability", 1.0e-13)     -- [mm^2]
+interPermeability = util.GetParamNumber(
+    "-interPermeability", 1.0e-11)        -- [mm^2]
+bjsPermeability = util.GetParamNumber(
+    "-bjsPermeability", 1.0e-13)          -- [mm^2]
 bjsAlpha = 0.2                             -- dimensionless
 normalImpedance = 1.0e3                    -- [mm/s]
 pressureScale = 1.0e4                      -- dimensionless
@@ -106,6 +114,15 @@ approxSpace:add_fct(
 approxSpace:add_fct(
     "p_darcy_scaled", "Lagrange", 1, allSubsets
 )
+-- Optional extension hook used by the quasi-steady transport driver.  The
+-- default flow model is unchanged when this table is absent.
+if flowExtraApproximationFunctions ~= nil then
+    for _, fct in ipairs(flowExtraApproximationFunctions) do
+        approxSpace:add_fct(
+            fct.name, "Lagrange", 1, fct.subsets
+        )
+    end
+end
 approxSpace:init_levels()
 approxSpace:init_top_surface()
 
@@ -222,6 +239,15 @@ domainDisc:add(pressureTrace)
 domainDisc:add(darcyOuterPressure)
 domainDisc:add(inactiveDarcy)
 domainDisc:add(inactiveStokes)
+-- Keep optional fields fixed during the initial standalone steady-flow solve.
+-- The coupled driver builds a new transient domain discretization afterwards.
+if flowExtraApproximationFunctions ~= nil then
+    steadyExtraFieldBoundary = DirichletBoundary()
+    for _, fct in ipairs(flowExtraApproximationFunctions) do
+        steadyExtraFieldBoundary:add(0.0, fct.name, fct.subsets)
+    end
+    domainDisc:add(steadyExtraFieldBoundary)
+end
 domainDisc:add(OneSideP1Constraints())
 
 darcyPressure = pressureScale * darcyMembraneEq:value()
@@ -346,9 +372,15 @@ interfaceFluxMismatch = interfaceDefectSums[3]
 --------------------------------------------------------------------------------
 
 physicalSolution = solution:clone()
+physicalScaleFactors = {1.0, 1.0, 1.0, 1.0, pressureScale}
+if flowExtraApproximationFunctions ~= nil then
+    for _ = 1, #flowExtraApproximationFunctions do
+        physicalScaleFactors[#physicalScaleFactors + 1] = 1.0
+    end
+end
 ScaleGF(
     physicalSolution, solution,
-    {1.0, 1.0, 1.0, 1.0, pressureScale}
+    physicalScaleFactors
 )
 physicalSolution:set_consistent_storage_type()
 

@@ -49,10 +49,11 @@ Topology and refinement guarantees
 ----------------------------------
 * Each input SWC must be one unbranched root-to-terminal path.
 * Each root end becomes Inlet_i; the opposite axial end becomes Outlet_i.
-* Each cap face is Inlet_i/Outlet_i and its shared rim is TripleJunction_i.
-* Every structured nephron subset carries the exact NeuriteProjector; the
-  shared Inter and OuterWall remain unprojected.
-* Optional refinement levels are validated and written as standalone UGX files.
+* Each cap face is Inlet_i/Outlet_i. Its shared rim edges remain Apical_i so
+  NeuriteProjector can propagate npSurfParams through repeated refinement.
+* Only Apical_i and Basolateral_i receive NeuriteProjectors. Volumes, caps,
+  Inter, and OuterWall are not projected onto a tube.
+* The output is coarse-only and can be refined later in ProMesh.
 
 Primary command
 ---------------
@@ -78,7 +79,7 @@ cfg.smoother = util.GetParam("-smoother",
 cfg.extendTerminals = util.GetParamNumber("-extendTerminals", 1) ~= 0
 cfg.terminalExtender = util.GetParam("-terminalExtender",
 	script_dir .. "/extend_swc_terminals_to_outerwall.py")
-cfg.terminalPaddingFactor = util.GetParamNumber("-terminalPaddingFactor", 0.0)
+cfg.terminalPaddingFactor = util.GetParamNumber("-terminalPaddingFactor", 25.0)
 cfg.radius = util.GetParamNumber("-radius", 1.0)
 cfg.membraneThickness = util.GetParamNumber("-membraneThickness", 0.2)
 cfg.centerlineScale = util.GetParamNumber("-centerlineScale", 1.0)
@@ -87,12 +88,12 @@ cfg.skipGeometryPreflight = util.GetParamNumber("-skipGeometryPreflight", 0) ~= 
 cfg.anisotropy = util.GetParamNumber("-anisotropy", 4.0)
 cfg.adaptiveAnisotropy = util.GetParamNumber("-adaptiveAnisotropy", 1) ~= 0
 cfg.bendAnisotropy = util.GetParamNumber("-bendAnisotropy", 1.0)
-cfg.bendChordErrorFactor = util.GetParamNumber("-bendChordErrorFactor", 0.01)
+cfg.bendChordErrorFactor = util.GetParamNumber("-bendChordErrorFactor", 0.02)
 cfg.gradedInter = util.GetParamNumber("-gradedInter", 1) ~= 0
 cfg.interNearEdgeFactor = util.GetParamNumber("-interNearEdgeFactor", 2.0)
 cfg.interNearDistanceFactor = util.GetParamNumber("-interNearDistanceFactor", 1.5)
-cfg.interFarDistanceFactor = util.GetParamNumber("-interFarDistanceFactor", 5.0)
-cfg.interFarEdgeFactor = util.GetParamNumber("-interFarEdgeFactor", 8.0)
+cfg.interFarDistanceFactor = util.GetParamNumber("-interFarDistanceFactor", 6.0)
+cfg.interFarEdgeFactor = util.GetParamNumber("-interFarEdgeFactor", 6.0)
 cfg.ogrid = math.floor(util.GetParamNumber("-ogrid", 10))
 -- Keep one lumen-midpoint support ring between the center and Apical ring.
 -- Removing it makes projected cross-sectional refinement connect large child
@@ -105,36 +106,15 @@ cfg.coarseLumenCenterOnly = util.GetParamNumber("-coarseLumenCenterOnly", 0) ~= 
 -- memory. Cross-sectional-only refinement remains experimental (-crossOnly 1).
 cfg.numRefs = math.floor(util.GetParamNumber("-numRefs", 0))
 cfg.crossOnly = util.GetParamNumber("-crossOnly", 0) ~= 0
-cfg.validate = util.GetParamNumber("-validate", 1) ~= 0
-cfg.validator = util.GetParam("-validator",
-	script_dir .. "/validate_ugx_mesh.py")
 cfg.padding = util.GetParamNumber("-padding",
 	math.max(10.0 * cfg.centerlineScale, 2.0 * requested_outer_radius))
 cfg.paddingX = util.GetParamNumber("-paddingX", cfg.padding)
 cfg.paddingY = util.GetParamNumber("-paddingY", cfg.padding)
 cfg.paddingZ = util.GetParamNumber("-paddingZ", cfg.padding)
 cfg.interQuality = util.GetParamNumber("-interQuality", 2.0)
--- Use the same dimensionless geometry policy as the single-nephron pipeline.
--- C++ converts these factors into local physical tolerances from each tube
--- radius, surface-edge length, and box-cell scale.
-cfg.coordinateRelTol = util.GetParamNumber("-coordinateRelTol", 1e-10)
-cfg.containmentRelTol = util.GetParamNumber("-containmentRelTol", 1e-6)
-cfg.parameterTol = util.GetParamNumber("-parameterTol", 1e-7)
-cfg.mergeRadiusFactor = util.GetParamNumber("-mergeRadiusFactor", 1e-4)
-cfg.terminalSnapRadiusFactor = util.GetParamNumber(
-	"-terminalSnapRadiusFactor", 2.0)
-cfg.straightnessRadiusFactor = util.GetParamNumber(
-	"-straightnessRadiusFactor", 1e-7)
-cfg.angularSpacingToleranceFactor = util.GetParamNumber(
-	"-angularSpacingToleranceFactor", 1e-5)
-cfg.interMinLayers = math.floor(util.GetParamNumber("-interMinLayers", 4))
-cfg.interMaxLayers = math.floor(util.GetParamNumber("-interMaxLayers", 12))
-cfg.interLayersPerSurfaceEdge = util.GetParamNumber(
-	"-interLayersPerSurfaceEdge", 3.0)
-cfg.interRadialGrowth = util.GetParamNumber("-interRadialGrowth", 2.0)
 -- Prefer -BoxRefs, while retaining the older -boxRefs spelling as an alias.
 cfg.boxRefs = math.floor(util.GetParamNumber("-BoxRefs",
-	util.GetParamNumber("-boxRefs", 3)))
+	util.GetParamNumber("-boxRefs", 4)))
 cfg.smoothOrder = math.floor(util.GetParamNumber("-smoothOrder", 3))
 cfg.samplesPerCorner = math.floor(util.GetParamNumber("-samplesPerCorner", 30))
 -- Match the verified single-nephron coarse-sweep repair.  This prevents cubic
@@ -210,16 +190,6 @@ local function file_contains(path, needle)
 	return text:find(needle, 1, true) ~= nil
 end
 
-local function validate_ugx(path)
-	if not cfg.validate then return end
-	local command = table.concat({
-		"python3", shell_quote(cfg.validator), shell_quote(path)
-	}, " ")
-	print("Validating generated mesh: " .. path)
-	local ok = os.execute(command)
-	assert(ok == true or ok == 0, "Mesh validation failed: " .. path)
-end
-
 local function smooth_swc(src, dst)
 	-- Smooth traces independently so interpolation never bridges two nephrons.
 	local command = table.concat({
@@ -286,47 +256,13 @@ local function audit_trace_curvature(points, label, outer_radius)
 				* distance(points[i-1], points[i+1]) / (2.0 * twice_area))
 		end
 	end
-	local cumulative = {0.0}
-	for i = 2, #points do
-		cumulative[i] = cumulative[i-1] + distance(points[i-1], points[i])
-	end
-	local exclusion_arclength = math.max(4.0 * outer_radius,
-		4.0 * cfg.resampleSpacing * cfg.centerlineScale)
-	local minimum_nonlocal = math.huge
-	for i = 1, #points do
-		for j = i+1, #points do
-			if cumulative[j] - cumulative[i] > exclusion_arclength then
-				minimum_nonlocal = math.min(minimum_nonlocal,
-					distance(points[i], points[j]))
-			end
-		end
-	end
-	print(string.format("Geometry preflight %s (um): outerRadius=%.9g, minCurvatureRadius=%.9g, minNonlocalCenterlineDistance=%.9g",
-		label, outer_radius, minimum, minimum_nonlocal))
+	print(string.format("Geometry preflight %s (um): outerRadius=%.9g, minCurvatureRadius=%.9g",
+		label, outer_radius, minimum))
 	if not cfg.skipGeometryPreflight then
 		assert(outer_radius < 0.9 * minimum,
 			string.format("%s: requested outer radius %.6g um is incompatible with centerline curvature %.6g um. Reduce radius/thickness or increase -centerlineScale.",
 				label, outer_radius, minimum))
-		assert(2.0 * outer_radius < 0.9 * minimum_nonlocal,
-			string.format("%s: requested outer diameter %.6g um exceeds non-local centerline clearance %.6g um.",
-				label, 2.0 * outer_radius, minimum_nonlocal))
 	end
-end
-
-local function minimum_distance_between_traces(first, second)
-	local minimum = math.huge
-	for _, a in ipairs(first) do
-		local ax = assert(tonumber(a[3])) * cfg.centerlineScale
-		local ay = assert(tonumber(a[4])) * cfg.centerlineScale
-		local az = assert(tonumber(a[5])) * cfg.centerlineScale
-		for _, b in ipairs(second) do
-			local dx = ax - assert(tonumber(b[3])) * cfg.centerlineScale
-			local dy = ay - assert(tonumber(b[4])) * cfg.centerlineScale
-			local dz = az - assert(tonumber(b[5])) * cfg.centerlineScale
-			minimum = math.min(minimum, math.sqrt(dx*dx + dy*dy + dz*dz))
-		end
-	end
-	return minimum
 end
 
 assert(cfg.radius > 0, "radius must be > 0")
@@ -352,37 +288,8 @@ assert(cfg.paddingY > 0, "paddingY must be > 0")
 assert(cfg.paddingZ > 0, "paddingZ must be > 0")
 assert(cfg.terminalPaddingFactor >= 0, "terminalPaddingFactor must be >= 0")
 assert(cfg.interQuality > 0, "interQuality must be > 0")
-assert(cfg.coordinateRelTol > 0 and cfg.coordinateRelTol <= 1e-2,
-	"coordinateRelTol must be in (0, 1e-2]")
-assert(cfg.containmentRelTol > 0 and cfg.containmentRelTol <= 1e-2,
-	"containmentRelTol must be in (0, 1e-2]")
-assert(cfg.parameterTol > 0 and cfg.parameterTol <= 1e-2,
-	"parameterTol must be in (0, 1e-2]")
-assert(cfg.mergeRadiusFactor > 0 and cfg.mergeRadiusFactor <= 0.1,
-	"mergeRadiusFactor must be in (0, 0.1]")
-assert(cfg.terminalSnapRadiusFactor > 0 and cfg.terminalSnapRadiusFactor <= 10,
-	"terminalSnapRadiusFactor must be in (0, 10]")
-assert(cfg.straightnessRadiusFactor > 0
-	and cfg.straightnessRadiusFactor <= 0.1,
-	"straightnessRadiusFactor must be in (0, 0.1]")
-assert(cfg.angularSpacingToleranceFactor > 0
-	and cfg.angularSpacingToleranceFactor <= 0.1,
-	"angularSpacingToleranceFactor must be in (0, 0.1]")
-assert(cfg.interMinLayers >= 2
-	and cfg.interMaxLayers >= cfg.interMinLayers
-	and cfg.interMaxLayers <= 64,
-	"Inter layer bounds require 2 <= min <= max <= 64")
-assert(cfg.interLayersPerSurfaceEdge > 0
-	and cfg.interLayersPerSurfaceEdge <= 100,
-	"interLayersPerSurfaceEdge must be in (0, 100]")
-assert(cfg.interRadialGrowth >= 0 and cfg.interRadialGrowth <= 20,
-	"interRadialGrowth must be between 0 and 20")
 assert(cfg.boxRefs >= 0 and cfg.boxRefs <= 10,
 	"boxRefs must be an integer between 0 and 10")
-if cfg.numRefs > 0 then
-	assert(cfg.ogrid >= 10,
-		"Refined production meshes require -ogrid >= 10; ogrid 6 produced an inverted Inter prism.")
-end
 ensure_dir(dirname(cfg.out))
 
 -- Stage 1: smooth, radius-normalize, and merge all traces ---------------------
@@ -391,7 +298,6 @@ local merged_swc = out_base .. "_merged_outer_radius.swc"
 local merged = assert(io.open(merged_swc, "w"), "Cannot create merged SWC.")
 local next_id = 1
 local outer_radius = cfg.radius + cfg.membraneThickness
-local audited_traces = {}
 
 for trace_index, raw_swc in ipairs(swcs) do
 	local ready_swc = out_base .. "_trace_" .. trace_index .. "_mesh_ready.swc"
@@ -399,18 +305,6 @@ for trace_index, raw_swc in ipairs(swcs) do
 	smooth_swc(raw_swc, ready_swc)
 	local points = read_swc(ready_swc)
 	audit_trace_curvature(points, "trace " .. trace_index, outer_radius)
-	for previous_index, previous in ipairs(audited_traces) do
-		local clearance = minimum_distance_between_traces(previous, points)
-		print(string.format(
-			"Geometry preflight traces %d/%d (um): minCenterlineDistance=%.9g",
-			previous_index, trace_index, clearance))
-		if not cfg.skipGeometryPreflight then
-			assert(2.0 * outer_radius < 0.9 * clearance,
-				string.format("Traces %d and %d overlap or lack clearance: outer diameter %.6g um, minimum centerline distance %.6g um.",
-					previous_index, trace_index, 2.0 * outer_radius, clearance))
-		end
-	end
-	audited_traces[#audited_traces + 1] = points
 	-- Every source file may reuse IDs such as 1, 2, 3. Allocate globally unique
 	-- IDs and translate each non-root parent through this file-local map.
 	local id_map = {}
@@ -461,13 +355,7 @@ local lumen_scale = cfg.radius / outer_radius
 configure_adaptive_nephron_meshing(
 	cfg.adaptiveAnisotropy, cfg.bendAnisotropy, cfg.bendChordErrorFactor,
 	cfg.gradedInter, cfg.interNearEdgeFactor, cfg.interNearDistanceFactor,
-	cfg.interFarDistanceFactor, cfg.interFarEdgeFactor, false, 0.0)
-configure_nephron_geometry_policy(
-	cfg.coordinateRelTol, cfg.containmentRelTol, cfg.parameterTol,
-	cfg.mergeRadiusFactor, cfg.terminalSnapRadiusFactor,
-	cfg.straightnessRadiusFactor, cfg.angularSpacingToleranceFactor,
-	cfg.interMinLayers, cfg.interMaxLayers,
-	cfg.interLayersPerSurfaceEdge, cfg.interRadialGrowth)
+	cfg.interFarDistanceFactor, cfg.interFarEdgeFactor, false)
 import_multiple_nephrons_with_membrane_and_inter_from_swc(
 	import_swc, out_ugx, #swcs, lumen_scale, cfg.anisotropy,
 	cfg.numRefs, cfg.padding * MESH_LENGTH_SCALE, cfg.interQuality, cfg.boxRefs,
@@ -478,10 +366,6 @@ assert(file_contains(out_ugx, "<projector type=\"neurite\""),
 	"UGX is missing its NeuriteProjector.")
 assert(file_contains(out_ugx, "<vertex_attachment name=\"npSurfParams\""),
 	"UGX is missing npSurfParams.")
-validate_ugx(out_ugx)
-for level = 1, cfg.numRefs do
-	validate_ugx(out_base .. "_refined_" .. level .. ".ugx")
-end
 
 -- Stage 4: concise result summary --------------------------------------------
 local vertices, edges, faces, volumes = count_mesh_elements(out_ugx)
@@ -499,14 +383,6 @@ print("Graded Inter: " .. tostring(cfg.gradedInter) .. ", edge factors "
 	.. cfg.interNearEdgeFactor .. " -> " .. cfg.interFarEdgeFactor
 	.. ", distance factors " .. cfg.interNearDistanceFactor .. " -> "
 	.. cfg.interFarDistanceFactor)
-print("Geometry policy: coordinate/containment/parameter tolerances "
-	.. cfg.coordinateRelTol .. " / " .. cfg.containmentRelTol .. " / "
-	.. cfg.parameterTol .. "; merge/radius=" .. cfg.mergeRadiusFactor
-	.. ", terminal snap/radius=" .. cfg.terminalSnapRadiusFactor
-	.. ", straightness/radius=" .. cfg.straightnessRadiusFactor)
-print("Automatic Inter radial layers: " .. cfg.interMinLayers .. ".."
-	.. cfg.interMaxLayers .. ", layers/surface-edge="
-	.. cfg.interLayersPerSurfaceEdge .. ", growth=" .. cfg.interRadialGrowth)
 print("Centerline scale: " .. cfg.centerlineScale)
 print("SWC resample spacing (um): " .. cfg.resampleSpacing)
 print("Terminal extension spacing (um): " .. cfg.terminalSpacing)

@@ -126,7 +126,11 @@ cfg.interMinLayers = math.floor(util.GetParamNumber("-interMinLayers", 4))
 cfg.interMaxLayers = math.floor(util.GetParamNumber("-interMaxLayers", 12))
 cfg.interLayersPerSurfaceEdge = util.GetParamNumber(
 	"-interLayersPerSurfaceEdge", 3.0)
-cfg.interRadialGrowth = util.GetParamNumber("-interRadialGrowth", 2.0)
+-- Uniform radial spacing is the natural default for the hexahedral near field.
+-- Retain the established outward grading for the prism topology.
+local defaultInterRadialGrowth = cfg.interMesh == "hex" and 0.0 or 2.0
+cfg.interRadialGrowth = util.GetParamNumber(
+	"-interRadialGrowth", defaultInterRadialGrowth)
 -- Prefer -BoxRefs, while retaining the older -boxRefs spelling as an alias.
 cfg.boxRefs = math.floor(util.GetParamNumber("-BoxRefs",
 	util.GetParamNumber("-boxRefs", 4)))

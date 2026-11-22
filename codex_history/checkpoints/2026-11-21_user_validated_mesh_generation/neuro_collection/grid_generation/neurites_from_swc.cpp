@@ -5183,9 +5183,25 @@ static void add_straight_prismatic_inter_to_version2_nephron
 			: boxPadding;
 		std::vector<Face*> oldOuterFaces(sh.begin<Face>(4), sh.end<Face>(4));
 
-		const std::vector<number> radialFractions =
+		std::vector<number> radialFractions =
 			automatic_inter_radial_fractions(
 				curvedInterThickness, surfaceEdgeScale);
+		if (!g_adaptiveNephronMeshing.prismaticInter
+		    && g_nephronGeometryPolicy.interRadialGrowth
+		       <= std::numeric_limits<number>::epsilon())
+		{
+			// Keep every structured hex slab equally thick.  The final slab is
+			// not a hex: it contains the quad-to-triangle pyramid/tet bridge.
+			// Giving that bridge 2.5 hex widths keeps its inner boundary near the
+			// previously validated graded radius and avoids terminal pyramid collapse
+			// without reintroducing grading among the actual hexahedra.
+			const number transitionWeight = 2.5;
+			const number totalWeight =
+				(number)(radialFractions.size() - 1) + transitionWeight;
+			for (size_t i = 0; i + 1 < radialFractions.size(); ++i)
+				radialFractions[i] = (number)(i + 1) / totalWeight;
+			radialFractions.back() = 1.0;
+		}
 		const size_t addedLayerCount = radialFractions.size();
 		const size_t layerCount = addedLayerCount + 1;
 		const size_t outerLayer = layerCount - 1;

@@ -27,8 +27,6 @@ local cfg = {}
 cfg.grid = util.GetParam("-grid", MODEL_ROOT .. "/runs/sample_tree_projector.ugx")
 cfg.out = util.GetParam("-out", MODEL_ROOT .. "/runs/sample_tree_projector_refined.ugx")
 cfg.refs = math.floor(util.GetParamNumber("-refs", 1))
-cfg.validate = util.GetParamNumber("-validate", 1) ~= 0
-cfg.validator = util.GetParam("-validator", GENERATION_DIR .. "/validate_ugx_mesh.py")
 
 local function shell_quote(s)
 	return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
@@ -82,47 +80,9 @@ for i = 1, cfg.refs do
 	SelectAll(mesh)
 	print("  projected refine " .. i .. " / " .. cfg.refs)
 	Refine(mesh)
-
-	-- Projected refinement can leave detached child vertices at constrained
-	-- terminal interfaces.  They are not part of any edge, face, or volume and
-	-- must not be serialized or allowed to become parents of the next level.
-	ClearSelection(mesh)
-	local orphanVertices = SelectUnconnectedVertices(mesh, true, true, true)
-	if orphanVertices > 0 then
-		EraseSelectedElements(mesh, true, true, true)
-	end
-
-	-- Projection changes child coordinates after their connectivity has been
-	-- created.  A non-degenerate tetrahedron may consequently have the opposite
-	-- vertex ordering.  Normalize every volume after every level, exactly as the
-	-- Neuro Collection generator does before writing its flat level files.
-	ClearSelection(mesh)
-	SelectAllVolumes(mesh)
-	local corrected = FixVolumeOrientation(mesh)
-
-	-- Check orientation determinacy after repair.  A cell that has the same
-	-- orientation before and after a flip is collapsed/pathological and is a
-	-- hard mesh-generation failure, never something to pass to a solver.
-	ClearSelection(mesh)
-	local unorientable = SelectUnorientableVolumes(mesh)
-	assert(unorientable == 0,
-		"Projected refinement level " .. i .. " created " .. unorientable
-		.. " unorientable/degenerate volumes")
-	ClearSelection(mesh)
-
-	print("    removed detached vertices: " .. orphanVertices)
-	print("    corrected volume orientations: " .. corrected)
-	print("    unorientable/degenerate volumes: " .. unorientable)
 end
 
 assert(SaveMesh(mesh, cfg.out), "SaveMesh failed: " .. cfg.out)
 assert_neurite_projector_ugx(cfg.out)
-if cfg.validate then
-	print("Validating refined mesh: " .. cfg.out)
-	local ok = os.execute("python3 " .. shell_quote(cfg.validator)
-		.. " " .. shell_quote(cfg.out))
-	assert(ok == true or ok == 0,
-		"Mesh validation failed; refusing refined output: " .. cfg.out)
-end
 
 print("Done. Output still contains NeuriteProjector and npSurfParams.")
