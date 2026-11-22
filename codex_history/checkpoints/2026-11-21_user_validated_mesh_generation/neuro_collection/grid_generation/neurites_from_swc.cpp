@@ -3649,7 +3649,8 @@ static void create_padded_box_surface
 	size_t numSurfaceRefs = 0,
 	const OuterWallTerminalMetadata* terminalMetadata = NULL,
 	Grid::VertexAttachmentAccessor<Attachment<NeuriteProjector::SurfaceParams> >*
-		aaSurfParams = NULL
+		aaSurfParams = NULL,
+	bool recenterTerminalSections = true
 )
 {
 	UG_COND_THROW(padding <= 0.0, "Box padding must be positive.");
@@ -3795,7 +3796,8 @@ static void create_padded_box_surface
 			// balanced transition on both the root and tip sides.
 			vector3 tangentialShift;
 			VecSet(tangentialShift, 0.0);
-			for (size_t dimension = 0; dimension < 3; ++dimension)
+			for (size_t dimension = 0;
+			     recenterTerminalSections && dimension < 3; ++dimension)
 			{
 				if (dimension == nearestAxis) continue;
 				const number extent = boxMax[dimension] - boxMin[dimension];
@@ -5205,6 +5207,84 @@ static void add_straight_prismatic_inter_to_version2_nephron
 		const size_t addedLayerCount = radialFractions.size();
 		const size_t layerCount = addedLayerCount + 1;
 		const size_t outerLayer = layerCount - 1;
+		// A full-width structured layer at a terminal portal can be much wider
+		// than the local tube radius.  The portal then meets the planar OuterWall
+		// patch with coincident/near-coincident constraints, which can make TetGen
+		// fail or create zero-volume children after projected refinement.  Keep the
+		// requested thickness in the interior, but taper only the first two axial
+		// intervals at each terminal.  The cap remains conforming and every swept
+		// cell keeps its existing type; only its terminal radial width changes.
+		std::vector<number> stationInterThickness(
+			rings.size(), curvedInterThickness);
+		if (!g_adaptiveNephronMeshing.prismaticInter && rings.size() > 2)
+		{
+			const number safePortalThickness = std::min(
+				curvedInterThickness, 0.5 * tubeRadiusScale);
+			const size_t rampIntervals = std::min<size_t>(
+				2, (rings.size() - 1) / 2);
+			for (size_t s = 0; s < rings.size(); ++s)
+			{
+				const size_t terminalDistance = std::min(s, rings.size() - 1 - s);
+				if (terminalDistance > rampIntervals) continue;
+				const number t = rampIntervals == 0 ? 1.0
+					: (number)terminalDistance / (number)rampIntervals;
+				// Smoothstep avoids a slope jump where the taper reaches the
+				// constant-thickness interior.
+				const number blend = t * t * (3.0 - 2.0 * t);
+				stationInterThickness[s] = safePortalThickness
+					+ blend * (curvedInterThickness - safePortalThickness);
+			}
+
+			// A swept radial offset is valid only while its total radius remains
+			// below the local centerline radius of curvature.  This matters most in
+			// the terminal extension, where a short wall-alignment bend can be much
+			// tighter than the smoothed physiological trace.  Cap only those local
+			// stations; the requested thickness remains unchanged elsewhere.
+			size_t curvatureLimitedStations = 0;
+			number minimumAppliedThickness = curvedInterThickness;
+			for (size_t s = 1; s + 1 < rings.size(); ++s)
+			{
+				const number a = VecDistance(ringCenters[s-1], ringCenters[s]);
+				const number b = VecDistance(ringCenters[s], ringCenters[s+1]);
+				const number c = VecDistance(ringCenters[s-1], ringCenters[s+1]);
+				vector3 first, second, cross;
+				VecSubtract(first, ringCenters[s], ringCenters[s-1]);
+				VecSubtract(second, ringCenters[s+1], ringCenters[s-1]);
+				VecCross(cross, first, second);
+				const number twiceArea = VecLength(cross);
+				if (a <= 0.0 || b <= 0.0 || c <= 0.0
+				    || twiceArea <= straightTolerance * straightTolerance)
+					continue;
+				const number curvatureRadius = a * b * c / (2.0 * twiceArea);
+				const number curvatureThickness = std::max(
+					0.25 * surfaceEdgeScale,
+					0.60 * curvatureRadius - tubeRadiusScale);
+				if (curvatureThickness < stationInterThickness[s])
+				{
+					stationInterThickness[s] = curvatureThickness;
+					++curvatureLimitedStations;
+				}
+			}
+			// Limit the radial expansion slope to 0.35 unit per axial unit so
+			// adjacent hex slabs cannot fold while recovering to full thickness.
+			for (size_t s = 1; s < rings.size(); ++s)
+				stationInterThickness[s] = std::min(
+					stationInterThickness[s], stationInterThickness[s-1]
+					+ 0.35 * VecDistance(ringCenters[s-1], ringCenters[s]));
+			for (size_t s = rings.size() - 1; s > 0; --s)
+				stationInterThickness[s-1] = std::min(
+					stationInterThickness[s-1], stationInterThickness[s]
+					+ 0.35 * VecDistance(ringCenters[s-1], ringCenters[s]));
+			for (size_t s = 0; s < rings.size(); ++s)
+				minimumAppliedThickness = std::min(
+					minimumAppliedThickness, stationInterThickness[s]);
+			UG_LOGN("Hex Inter adaptive thickness: requested="
+			        << curvedInterThickness << ", portal="
+			        << safePortalThickness << ", minimum="
+			        << minimumAppliedThickness << ", terminal ramp intervals="
+			        << rampIntervals << ", curvature-limited stations="
+			        << curvatureLimitedStations << ".");
+		}
 		std::vector<std::vector<Vertex*> > stationNodes(
 			rings.size(), std::vector<Vertex*>(layerCount * angularCount, NULL));
 
@@ -5224,7 +5304,7 @@ static void add_straight_prismatic_inter_to_version2_nephron
 				{
 					RegularVertex* vertex = *g.create<RegularVertex>();
 					const number distance = innerDistance +
-						radialFractions[layer - 1] * curvedInterThickness;
+						radialFractions[layer - 1] * stationInterThickness[s];
 					VecScaleAdd(aaPos[vertex], 1.0, center, distance, direction);
 					aaSurfParams[vertex] = aaSurfParams[rings[s][i]];
 					aaSurfParams[vertex].radial = (float)(distance / innerDistance);
@@ -5457,8 +5537,14 @@ static void add_straight_prismatic_inter_to_version2_nephron
 		// The terminal annulus of the near-field layer is already occupied by
 		// Inter cells. It is intentionally not part of the outer-bulk PLC; only
 		// the transition side wall and the rebuilt box patch meet at the portal rim.
+		// The original OuterWall construction already centered the physical tube
+		// terminal using the user-requested BoxRefs.  This second construction
+		// replaces only the wall patch around the larger structured Inter portal.
+		// Re-centering it on this internal level-4 grid would translate the cap a
+		// second time (by an entire coarse-cell fraction for BoxRefs 2/3), folding
+		// terminal prisms and creating coincident transition vertices.
 		create_padded_box_surface(g, sh, aaPos, boxPadding, 4, 4,
-		                          &terminalMetadata, &aaSurfParams);
+		                          &terminalMetadata, &aaSurfParams, false);
 		for (size_t i = 0; i < physicalBasolateral.size(); ++i)
 		{
 			sh.assign_subset(physicalBasolateral[i], 2);
