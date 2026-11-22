@@ -5505,14 +5505,17 @@ static void add_straight_prismatic_inter_to_version2_nephron
 		// retaining the exact original fixed box bounds. During this operation the
 		// transition shell temporarily plays the role of the portal rim.
 		std::vector<Face*> physicalBasolateral(sh.begin<Face>(2), sh.end<Face>(2));
+		const int temporaryBasolateralSubset = sh.num_subsets();
 		for (size_t i = 0; i < physicalBasolateral.size(); ++i)
 		{
-			sh.assign_subset(physicalBasolateral[i], 10);
+			sh.assign_subset(physicalBasolateral[i], temporaryBasolateralSubset);
 			Grid::traits<Edge>::secure_container edges;
 			g.associated_elements(edges, physicalBasolateral[i]);
-			for (size_t e = 0; e < edges.size(); ++e) sh.assign_subset(edges[e], 10);
+			for (size_t e = 0; e < edges.size(); ++e)
+				sh.assign_subset(edges[e], temporaryBasolateralSubset);
 			for (size_t v = 0; v < physicalBasolateral[i]->num_vertices(); ++v)
-				sh.assign_subset(physicalBasolateral[i]->vertex(v), 10);
+				sh.assign_subset(physicalBasolateral[i]->vertex(v),
+				                 temporaryBasolateralSubset);
 		}
 		for (std::set<Face*>::iterator it = transitionOuterFaces.begin();
 		     it != transitionOuterFaces.end(); ++it)
@@ -5565,6 +5568,12 @@ static void add_straight_prismatic_inter_to_version2_nephron
 		for (std::set<Face*>::iterator it = transitionOuterFaces.begin();
 		     it != transitionOuterFaces.end(); ++it)
 			sh.assign_subset(*it, 6);
+		UG_COND_THROW(sh.num<Vertex>(temporaryBasolateralSubset) != 0
+		              || sh.num<Edge>(temporaryBasolateralSubset) != 0
+		              || sh.num<Face>(temporaryBasolateralSubset) != 0
+		              || sh.num<Volume>(temporaryBasolateralSubset) != 0,
+		              "Temporary Basolateral portal subset was not emptied.");
+		sh.erase_subset(temporaryBasolateralSubset);
 
 		add_isolated_inter_to_version2_nephron(g, sh, psh, aaPos,
 			aaSurfParams, 2.0, true, false, 6, false);
