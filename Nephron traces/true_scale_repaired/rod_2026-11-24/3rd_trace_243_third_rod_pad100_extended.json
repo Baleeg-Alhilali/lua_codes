@@ -1,0 +1,40 @@
+{
+  "input": "/Users/alhilaba/Documents/Promesh_swc/Model/runs/rod_repair_2026-11-24/third_b32/third_b32_p1_outerwall_extended.swc",
+  "method": "inextensible rod (repair_trace_rod.py)",
+  "targets": {
+    "clearance_um": 55.0,
+    "min_curvature_radius_um": 32.0,
+    "exclusion_arclength_um": 80.0
+  },
+  "before": {
+    "length_um": 627.8119220108492,
+    "min_curvature_radius_um": 10.072900714360909,
+    "min_nonlocal_distance_um": 43.165163759519494
+  },
+  "after": {
+    "length_um": 626.7953568144958,
+    "min_curvature_radius_um": 32.68299656403607,
+    "min_nonlocal_distance_um": 56.380647081692565
+  },
+  "displacement": {
+    "max_displacement_um": 8.26132427333853,
+    "mean_displacement_um": 1.6195372267578836,
+    "fraction_moved_over_2um": 0.20190779014308427
+  },
+  "length_retained_vs_raw": 0.9974715110624459,
+  "raw_length_um": 628.3842193616854,
+  "denoised_length_um": 627.197685597655,
+  "target_length_um": 627.197685597655,
+  "segments": 251,
+  "segment_length_um": 2.49879556015002,
+  "stages": [
+    {
+      "length_um": 626.7953568144958,
+      "min_curvature_radius_um": 32.68299656403607,
+      "min_nonlocal_distance_um": 56.380647081692565,
+      "segment_length_rel_dev_max": 5.53523455488758e-05,
+      "weight": 10.0
+    }
+  ],
+  "seconds": 18.63420081138611
+}

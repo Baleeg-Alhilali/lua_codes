@@ -1,0 +1,40 @@
+{
+  "input": "Nephron traces/4th_trace_third.swc",
+  "method": "inextensible rod (repair_trace_rod.py)",
+  "targets": {
+    "clearance_um": 55.0,
+    "min_curvature_radius_um": 31.944444444444446,
+    "exclusion_arclength_um": 80.0
+  },
+  "before": {
+    "length_um": 371.8873762553927,
+    "min_curvature_radius_um": 3.3186682459685533,
+    "min_nonlocal_distance_um": 47.81293665178851
+  },
+  "after": {
+    "length_um": 370.15230909641525,
+    "min_curvature_radius_um": 32.243355086275635,
+    "min_nonlocal_distance_um": 61.373479533049924
+  },
+  "displacement": {
+    "max_displacement_um": 9.092819089881488,
+    "mean_displacement_um": 3.2983447277569247,
+    "fraction_moved_over_2um": 0.6230366492146597
+  },
+  "length_retained_vs_raw": 0.972790182534014,
+  "raw_length_um": 380.5058025279493,
+  "denoised_length_um": 370.4159753190458,
+  "target_length_um": 370.4159753190458,
+  "segments": 148,
+  "segment_length_um": 2.5028106440476066,
+  "stages": [
+    {
+      "length_um": 370.15230909641525,
+      "min_curvature_radius_um": 32.243355086275635,
+      "min_nonlocal_distance_um": 61.373479533049924,
+      "segment_length_rel_dev_max": 0.0001292584263494767,
+      "weight": 10.0
+    }
+  ],
+  "seconds": 13.987836837768555
+}

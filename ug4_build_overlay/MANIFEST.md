@@ -39,7 +39,7 @@ Key post-change hashes (also in `SHA256SUMS_installed.txt`):
 - `ugcore/.../projectors/neurite_projector.h` `914862019aba9df74b101018df5de015f0f6caa7c426931dd2c738c6b72ee280`
 - `ugcore/.../projectors/neurite_projector.cpp` `5370a773ff6264b4aa03f312848bbf54ec023ad65dac829cf34a699fc60fe941`
 - `ugcore/.../grid_generation/tetrahedralization.cpp` `51b0b40b4436155fe3b1c063bba7ba612e9dd0c963d079afecce3585721e2d62`
-- `neuro_collection/grid_generation/neurites_from_swc.cpp` `c61a0c304dc4904824f000e28436eb7581d592cc770aa3ff2f2ce446c9e419db`
+- `neuro_collection/grid_generation/neurites_from_swc.cpp` `55402eebee844c48417a62f237b8db3c3a2d4c6f7ff5aac8e15f172aff5b3fab` (2026-11-24 linear outward caps + checker lineage/mode 4; previous `c61a0c30…`)
 - `neuro_collection/pressure_trace_constraint.cpp` `5e0d776fb4e939036ebebb21f2094f3e82ea99af9f686354a040526f04b8e63c`
 
 ## Build configuration used (this workstation)
@@ -59,3 +59,6 @@ ConvectionDiffusion, Limex, NavierStokes, ProMesh, SuperLU6
   used for the reported meshes.
 - NeuriteProjector serializes a radial-fade pair from class version 1; UGX
   files written with this build need this build (older files still load).
+- `UG_NEPHRON_PROJECTED_CAPS=1` restores the fully projected outward caps
+  (default since 2026-11-24: caps refine linearly, base quads stay on the tube
+  map; see `docs/ROD_REPAIR_AND_LINEAR_CAPS_2026-11-24.md`).

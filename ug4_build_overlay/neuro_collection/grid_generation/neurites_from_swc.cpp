@@ -5867,6 +5867,56 @@ static void add_straight_prismatic_inter_to_version2_nephron
 					psh.assign_subset(volume->vertex(v), 0);
 			}
 
+			// Linear outward caps (2026-11-24).  A projected slanted cap edge
+			// (base corner -> apex) interpolates (axial, angle, radius) and is
+			// therefore a spiral that bulges ~4% of its length at r1 and ~2% at
+			// r2.  The adjacent TetGen tetrahedra are linear and some have small
+			// corner angles at cap vertices; their quality losses (fourth trace:
+			// 0.076 -> 0.027 -> 0.0013 for one tet) sum to more than the initial
+			// quality, i.e. inversion near r3.  The cap is only the interface to
+			// TetGen, so its volume, triangles and slanted edges are linear; the
+			// base quad (shared with the hex shell) and its edges stay on the map.
+			// The apex keeps its map position.  UG_NEPHRON_PROJECTED_CAPS=1
+			// restores the previous fully projected caps.
+			const char* projectedCapsEnv = std::getenv("UG_NEPHRON_PROJECTED_CAPS");
+			const bool linearCaps = !(projectedCapsEnv && std::atoi(projectedCapsEnv) != 0);
+			size_t linearCapCount = 0;
+			for (size_t i = 0; linearCaps && i < interNearVolumes.size(); ++i)
+			{
+				Volume* volume = interNearVolumes[i];
+				if (volume->reference_object_id() != ROID_PYRAMID) continue;
+				Face* base = g.get_face(volume, 0);
+				if (!base || base->num_vertices() != 4) continue;
+				Grid::traits<Volume>::secure_container baseVols;
+				g.associated_elements(baseVols, base);
+				bool onHex = false;
+				for (size_t k = 0; k < baseVols.size(); ++k)
+					if (baseVols[k]->reference_object_id() == ROID_HEXAHEDRON)
+						onHex = true;
+				if (!onHex) continue;
+				psh.assign_subset(volume, 1);
+				Grid::traits<Face>::secure_container cFaces;
+				g.associated_elements(cFaces, volume);
+				for (size_t f = 0; f < cFaces.size(); ++f)
+					if (cFaces[f] != base) psh.assign_subset(cFaces[f], 1);
+				Grid::traits<Edge>::secure_container cEdges;
+				g.associated_elements(cEdges, volume);
+				for (size_t e = 0; e < cEdges.size(); ++e)
+				{
+					bool in0 = false, in1 = false;
+					for (size_t q = 0; q < 4; ++q)
+					{
+						if (base->vertex(q) == cEdges[e]->vertex(0)) in0 = true;
+						if (base->vertex(q) == cEdges[e]->vertex(1)) in1 = true;
+					}
+					if (!(in0 && in1)) psh.assign_subset(cEdges[e], 1);
+				}
+				++linearCapCount;
+			}
+			if (linearCaps)
+				UG_LOGN("Hex Inter: " << linearCapCount << " outward caps refine linearly "
+				        << "(slanted edges and triangles off the tube map; base quads on it).");
+
 			// ---------------------------------------------------------------
 			// Gradual curved-to-linear fade into the tetrahedral Inter.
 			// Inter vertices within the fade band receive surface parameters of
@@ -9677,9 +9727,10 @@ void check_local_nephron_refinement
 	size_t bufferLayers
 )
 {
-	UG_COND_THROW(mode < 0 || mode > 3,
+	UG_COND_THROW(mode < 0 || mode > 4,
 	              "mode: 0 = near nephron, 1 = sphere window, 2 = global, "
-	              "3 = global without projector (linear diagnostic).");
+	              "3 = global without projector (linear diagnostic), "
+	              "4 = global with linear outward caps (diagnostic).");
 	Domain3d dom;
 	dom.create_additional_subset_handler("projSH");
 	try {LoadDomain(dom, fileName.c_str());}
@@ -9707,6 +9758,51 @@ void check_local_nephron_refinement
 				UG_LOGN("Projector subset " << i << ": NeuriteProjector, radial fade "
 				        << np->radial_fade_start() << " -> " << np->radial_fade_end());
 		}
+	}
+
+	if (mode == 4)
+	{
+		// Diagnostic: treat every outward cap pyramid (Inter pyramid whose
+		// base quad is shared with a hexahedron) as linear.  The pyramid, its
+		// triangles and its four slanted (base corner -> apex) edges move to
+		// projSH 1; the base quad and its edges stay on the tube map.
+		const int interSI = sh.get_subset_index("Inter");
+		size_t caps = 0, edges = 0, faces = 0;
+		for (VolumeIterator it = mg.begin<Pyramid>(); it != mg.end<Pyramid>(); ++it)
+		{
+			Volume* pyr = *it;
+			if (sh.get_subset_index(pyr) != interSI || psh->get_subset_index(pyr) != 0) continue;
+			Face* base = mg.get_face(pyr, 0);
+			if (!base || base->num_vertices() != 4) continue;
+			Grid::traits<Volume>::secure_container nbs;
+			mg.associated_elements(nbs, base);
+			bool onHex = false;
+			for (size_t k = 0; k < nbs.size(); ++k)
+				if (nbs[k]->reference_object_id() == ROID_HEXAHEDRON) onHex = true;
+			if (!onHex) continue;
+			psh->assign_subset(pyr, 1); ++caps;
+			Grid::traits<Face>::secure_container fcs;
+			mg.associated_elements(fcs, pyr);
+			for (size_t k = 0; k < fcs.size(); ++k)
+				if (fcs[k] != base && psh->get_subset_index(fcs[k]) != 1)
+				{psh->assign_subset(fcs[k], 1); ++faces;}
+			Grid::traits<Edge>::secure_container eds;
+			mg.associated_elements(eds, pyr);
+			for (size_t k = 0; k < eds.size(); ++k)
+			{
+				bool inBase0 = false, inBase1 = false;
+				for (size_t q = 0; q < 4; ++q)
+				{
+					if (base->vertex(q) == eds[k]->vertex(0)) inBase0 = true;
+					if (base->vertex(q) == eds[k]->vertex(1)) inBase1 = true;
+				}
+				if (inBase0 && inBase1) continue;
+				if (psh->get_subset_index(eds[k]) != 1)
+				{psh->assign_subset(eds[k], 1); ++edges;}
+			}
+		}
+		UG_LOGN("Mode 4: made " << caps << " cap pyramids, " << faces
+		        << " cap triangles and " << edges << " slanted cap edges linear.");
 	}
 
 	HangingNodeRefiner_MultiGrid ref(mg, mode == 3
@@ -9743,7 +9839,7 @@ void check_local_nephron_refinement
 		{
 			Volume* v = leaves[i];
 			bool take = false;
-			if (mode == 2 || mode == 3) take = true;
+			if (mode >= 2) take = true;
 			else if (mode == 0) take = psh->get_subset_index(v) == 0;
 			else
 			{
@@ -9864,6 +9960,66 @@ void check_local_nephron_refinement
 			        << " projSH=" << psh->get_subset_index(w) << " center=" << c
 			        << " radial=[" << rmin << "," << rmax << "] axial=[" << amin
 			        << "," << amax << "]");
+		}
+
+		// Tetrahedron diagnostics (2026-11-24): separate linear tetrahedra by
+		// whether any of their edges is projected (projSH 0), and trace the
+		// worst tetrahedron through its ancestors.
+		{
+			number minJProjEdge = std::numeric_limits<number>::max();
+			number minJLinear = std::numeric_limits<number>::max();
+			size_t nBadProjEdge = 0, nBadLinear = 0;
+			for (VolumeIterator it = mg.begin<Volume>(); it != mg.end<Volume>(); ++it)
+			{
+				if (mg.has_children(*it) ||
+				    (*it)->reference_object_id() != ROID_TETRAHEDRON) continue;
+				const number j = corner_scaled_jacobian(*it, aaPos);
+				Grid::traits<Edge>::secure_container eds;
+				mg.associated_elements(eds, *it);
+				bool projEdge = false;
+				for (size_t k = 0; k < eds.size(); ++k)
+					if (psh->get_subset_index(eds[k]) == 0) {projEdge = true; break;}
+				if (projEdge) {minJProjEdge = std::min(minJProjEdge, j); if (j < 0.005) ++nBadProjEdge;}
+				else {minJLinear = std::min(minJLinear, j); if (j < 0.005) ++nBadLinear;}
+			}
+			UG_LOGN("  tets with a projected edge: min J=" << minJProjEdge << " (" << nBadProjEdge
+			        << " below 0.005); tets with only linear edges: min J=" << minJLinear
+			        << " (" << nBadLinear << " below 0.005)");
+			if (worstByType.count(ROID_TETRAHEDRON))
+			{
+				GridObject* o = worstByType[ROID_TETRAHEDRON];
+				int gen = 0;
+				while (o)
+				{
+					Volume* v = dynamic_cast<Volume*>(o);
+					if (!v) {UG_LOGN("    ancestor is not a volume"); break;}
+					std::ostringstream os;
+					os << "    gen -" << gen << " roid " << v->reference_object_id()
+					   << " J=" << corner_scaled_jacobian(v, aaPos)
+					   << " projSH=" << psh->get_subset_index(v) << " vertices:";
+					for (size_t k = 0; k < v->num_vertices(); ++k)
+					{
+						const NPSP& sp = aaSP[v->vertex(k)];
+						os << " [" << aaPos[v->vertex(k)] << " r=" << sp.radial << " t="
+						   << sp.axial << " a=" << sp.angular << " lvl="
+						   << mg.get_level(v->vertex(k)) << "]";
+					}
+					Grid::traits<Edge>::secure_container eds;
+					mg.associated_elements(eds, v);
+					os << " edgeProjSH:";
+					for (size_t k = 0; k < eds.size(); ++k)
+						os << " " << psh->get_subset_index(eds[k]);
+					Grid::traits<Face>::secure_container fcs;
+					mg.associated_elements(fcs, v);
+					os << " faceProjSH/subset:";
+					for (size_t k = 0; k < fcs.size(); ++k)
+						os << " " << psh->get_subset_index(fcs[k]) << "/"
+						   << sh.get_subset_index(fcs[k]);
+					UG_LOGN(os.str());
+					o = mg.get_parent(v);
+					++gen;
+				}
+			}
 		}
 		UG_COND_THROW(inverted != 0, "Local refinement level " << lvl
 		              << " produced " << inverted << " inverted leaf volumes.");

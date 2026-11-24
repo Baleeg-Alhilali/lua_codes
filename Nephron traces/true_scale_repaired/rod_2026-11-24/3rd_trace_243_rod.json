@@ -1,0 +1,89 @@
+{
+  "input": "Nephron traces/3rd_trace_243.swc",
+  "method": "inextensible rod (repair_trace_rod.py)",
+  "targets": {
+    "clearance_um": 55.0,
+    "min_curvature_radius_um": 31.944444444444446,
+    "exclusion_arclength_um": 80.0
+  },
+  "before": {
+    "length_um": 1294.4438608902985,
+    "min_curvature_radius_um": 3.107279994909735,
+    "min_nonlocal_distance_um": 22.116782679346798
+  },
+  "after": {
+    "length_um": 1293.5111286484048,
+    "min_curvature_radius_um": 32.06265946349272,
+    "min_nonlocal_distance_um": 55.38869877520589
+  },
+  "displacement": {
+    "max_displacement_um": 24.99908980904435,
+    "mean_displacement_um": 8.036389545710291,
+    "fraction_moved_over_2um": 0.8174242424242424
+  },
+  "length_retained_vs_raw": 0.9808453790403441,
+  "raw_length_um": 1318.771700707783,
+  "denoised_length_um": 1287.89211146983,
+  "target_length_um": 1287.89211146983,
+  "segments": 515,
+  "segment_length_um": 2.5007613814948155,
+  "stages": [
+    {
+      "length_um": 1286.5481585151383,
+      "min_curvature_radius_um": 29.307267361402612,
+      "min_nonlocal_distance_um": 50.26415401406187,
+      "segment_length_rel_dev_max": 0.00023705105023175133,
+      "weight": 10.0
+    },
+    {
+      "length_um": 1286.589162812019,
+      "min_curvature_radius_um": 30.032133042303908,
+      "min_nonlocal_distance_um": 51.80962260343257,
+      "segment_length_rel_dev_max": 0.0012757352898644658,
+      "weight": 40.0
+    },
+    {
+      "length_um": 1286.6478654301973,
+      "min_curvature_radius_um": 30.436055108498145,
+      "min_nonlocal_distance_um": 52.46107615202033,
+      "segment_length_rel_dev_max": 0.0014202867538712916,
+      "weight": 160.0
+    },
+    {
+      "length_um": 1287.9054708316337,
+      "min_curvature_radius_um": 31.16850135808538,
+      "min_nonlocal_distance_um": 53.22268539318166,
+      "segment_length_rel_dev_max": 0.00882045562636602,
+      "weight": 640.0
+    },
+    {
+      "length_um": 1289.8468684197414,
+      "min_curvature_radius_um": 31.688896198110065,
+      "min_nonlocal_distance_um": 53.903770721959546,
+      "segment_length_rel_dev_max": 0.019764899476782727,
+      "weight": 2560.0
+    },
+    {
+      "length_um": 1291.275324972017,
+      "min_curvature_radius_um": 32.09232009517248,
+      "min_nonlocal_distance_um": 54.70231759868632,
+      "segment_length_rel_dev_max": 0.033667941960693115,
+      "weight": 10240.0
+    },
+    {
+      "length_um": 1292.2505464425878,
+      "min_curvature_radius_um": 32.299812953508095,
+      "min_nonlocal_distance_um": 54.982282952897556,
+      "segment_length_rel_dev_max": 0.037217629534423535,
+      "weight": 40960.0
+    },
+    {
+      "length_um": 1293.5111286484048,
+      "min_curvature_radius_um": 32.06265946349272,
+      "min_nonlocal_distance_um": 55.38869877520589,
+      "segment_length_rel_dev_max": 0.05085898914754905,
+      "weight": 163840.0
+    }
+  ],
+  "seconds": 70.62362909317017
+}

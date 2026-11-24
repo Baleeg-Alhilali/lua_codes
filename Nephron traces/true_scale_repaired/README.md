@@ -83,3 +83,13 @@ measure the 5 um output points against the original and show smaller maxima
 The third-trace segment cannot reach a 28 um bend radius without the coil
 contracting to less than half its length (149 um); it needs a length-preserving
 repair or a check of the tracing/radius against the image.
+
+## Length-preserving rod repair (2026-11-24): `rod_2026-11-24/`
+
+`mesh_generation/tools/repair_trace_rod.py` (inextensible rod, bend 32 um,
+clearance 55 um) keeps 97-98 % of each trace's length instead of contracting
+it. `*_rod.swc/json/png` are single-trace repairs, `*_pad100_extended.swc` the
+mesh inputs with frozen OuterWall tails, and `*_joint_with_*_coil.swc` the
+joint third+fourth repair (55.1 um between the traces) for a shared Inter
+mesh. The third-trace segment and full trace mesh r0-r2 with stable quality.
+See `docs/ROD_REPAIR_AND_LINEAR_CAPS_2026-11-24.md`.

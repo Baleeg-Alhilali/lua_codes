@@ -1,0 +1,170 @@
+# Length-preserving trace repair and linear outward caps — 2026-11-24
+
+Branch `claude/mesh-generation-d62595` (Model, from `aff59b4`). UG4 tree
+`/Users/alhilaba/UG4_promesh_ogrid` (ugcore `46b9b57a8` + overlay). Serial runs on
+the 36 GB workstation, nothing above refinement level 2.
+
+Status: **geometry pass r0-r2 with stable r1 -> r2 quality** for the third
+trace (segment and full trace). No flow or transport solve has been run on
+these meshes. r3+ is not run here; the r1 -> r2 trend is the evidence.
+
+Follows `TRUE_SCALE_TRACE_AND_CURVED_BRIDGE_2026-11-23.md`.
+
+## 1. Length-preserving repair (`mesh_generation/tools/repair_trace_rod.py`)
+
+The earlier relaxation (`repair_trace_clearance.py`) leaves the length free,
+and curvature relaxation acts as curve-shortening flow: the third-trace
+segment contracted 349 -> 149 um, the full fourth trace 1134 -> 942 um.
+
+The new tool models the centreline as an **inextensible rod**: N segments of
+fixed length h (2.5 um), minimized with L-BFGS (PyTorch, double):
+
+- inextensibility `((|x_{i+1}-x_i| - h)/h)^2` (weight 1e4),
+- bend: three-point circumcurvature at h and 2h above 1/R* (squared excess),
+- clearance: every pair farther apart than 80 um of arc closer than C*,
+- weak fidelity to the 2 um Gaussian-denoised trace at the same arc length
+  (arc length is material for an inextensible rod), weak fairing, end anchor,
+- a homotopy ramps R*, C* from the input values to the targets (+3 % margin);
+  the constraint weight is then raised x4 per stage until the 5 um output
+  passes the same audit as the Lua preflight.
+
+The excess length has to go somewhere, so coils expand outward and lift out
+of their plane (see the PNGs). Target length = denoised length (raw minus
+voxel-click noise, ~3 %). Endpoints fixed by default (`--free-ends` anchors
+them softly), `--frozen-head/--frozen-tail` keep the OuterWall tails rigid and
+carry the `# UG4_` box metadata. Several inputs are repaired **jointly**
+(clearance also enforced between traces, without arc exclusion).
+
+Driver: `mesh_generation/tools/rod_repair_workflow.sh <raw.swc> <out_dir> <prefix>`
+(coil repair -> pipeline pass writing `_outerwall_extended.swc`, padding 100 um
+-> frozen-tail repair -> mesh r0-r2 -> optional `CHECK=1` in-memory check).
+
+### Bend target 32 um, not 28 um
+
+With the 28 um limit ((outer + shell)/0.82) the rod repair of
+`3rd_trace_243_third` (349 -> 339 um) generated r0, r1 and failed at r2 with one
+degenerate cap pyramid on the inner side of the bend at the end of a 40 um arc
+held exactly at R = 28.9 um. The free-length repair only touched the limit at
+isolated points; the rod holds long arcs on it. Default is now
+(outer + shell)/0.72 = **32 um**. 35 um was infeasible with fixed ends.
+
+### Results (1 um voxels, clearance 55 um, bend 32 um)
+
+| Trace | Raw -> repaired | Kept | Min bend / clearance | Max / mean move |
+|---|---|---:|---|---|
+| 3rd_trace_243_third | 349.1 -> 343.5 um | 98.4 % | 32.4 / 55.4 | 24.8 / 11.0 um |
+| 3rd_trace_243 (full) | 1318.8 -> 1293.5 um | 98.1 % | 32.1 / 55.4 | 25.0 / 8.0 um |
+| 4th_trace_167 (full) | 1134.1 -> 1114.7 um | 98.3 % | 32.4 / 56.3 | 23.4 / 7.4 um |
+| 4th_trace_third | 380.5 -> 370.2 um | 97.3 % | 32.2 / 61.4 | 9.1 / 3.3 um |
+
+Previous free-length repair: 149 um (3rd third, 43 %), 942 um (4th full, 83 %).
+Each run takes 15-70 s. Files: `Nephron traces/true_scale_repaired/rod_2026-11-24/`.
+
+### Joint repair of the third and fourth traces (for one shared Inter mesh)
+
+The raw full traces come within 18.3 um of each other; independent repairs
+leave 4.9 um (about 250 points closer than 55 um). Both traces end at the
+image edge (y ~ 110 um) with terminals 25.5 um apart, so fixed endpoints make
+the joint problem infeasible. `--free-ends` joint repair:
+
+| Trace | Raw -> repaired | Max / mean move |
+|---|---|---|
+| 3rd_trace_243 | 1318.8 -> 1286.8 um (97.6 %) | 29.6 / 11.4 um |
+| 4th_trace_167 | 1134.1 -> 1114.6 um (98.3 %) | 28.8 / 10.3 um |
+
+Min bend 32.8 um, min self-clearance 56.1 um, **min distance between the
+traces 55.1 um**. Files `*_joint_with_*_coil.swc`, `joint_3rd_4th_coil.json`.
+Not yet meshed: the shared mesh needs the multi-nephron pipeline, terminal
+extension of both traces to the OuterWall, and a joint frozen-tail repair.
+
+## 2. r1 -> r2 tetrahedron decline: cause and fix
+
+Full fourth trace (`inputs/fourth_trace_full_pad100/fourth_trace_full_pad100.ugx`),
+checker mode 2: tet 0.0140 (r1) -> 0.00126 (r2); hex/prism/pyramid stable.
+
+### Diagnosis
+
+The checker (`check_local_nephron_refinement`) now prints, at every level, the
+minimum J of tetrahedra with and without a projected (projSH 0) edge, and the
+worst tetrahedron's ancestry (vertices with parameters, edge/face projSH).
+
+- r1 worst: a linear TetGen tetrahedron in the gap between two passes of the
+  coil (corner axial parameters 0.37 and 0.50, ~160 um apart along the path,
+  10 um apart in space), spanning cap vertices of both passes.
+- r2 worst: a linear tetrahedron in the valley between two circumferentially
+  adjacent caps, with two apexes, their shared base corner and a far vertex.
+  Ancestry J: 0.076 (r0) -> 0.027 (r1) -> 0.0013 (r2).
+
+In both cases the projected edges are the **slanted cap edges** (base corner
+-> apex). The projector interpolates (axial, angle, radius) along them, so in
+the cross-section the edge is a spiral: its midpoint lies 0.33 um (3.8 % of
+the edge) off the chord at r1 and 2 % at r2 (measured). The neighbouring
+tetrahedra are linear and have small corner angles at cap vertices. The
+corner child keeps the parent shape, so each level's offset removes about
+the same fraction of thickness: losses 0.049, 0.026, ... sum to ~0.1 > 0.076,
+i.e. that tetrahedron would invert near r3. Linear refinement (mode 3) keeps
+all qualities exactly, which confirms projected placement as the cause.
+
+### Fix (neurites_from_swc.cpp)
+
+The cap is only the interface to TetGen, so its curvature is not needed:
+cap pyramids, their triangles and slanted edges are now projSH 1 (linear);
+the base quad (shared with the hex shell) and its edges stay on the tube map;
+the apex keeps its map position. `UG_NEPHRON_PROJECTED_CAPS=1` restores the
+fully projected caps. The checker's mode 4 applies the same reassignment to an
+existing UGX (diagnostic, identical coarse mesh, no TetGen variation).
+
+Same coarse mesh, full fourth trace:
+
+| Mode | tet r1 / r2 | hex r1 / r2 | pyramid r1 / r2 |
+|---|---|---|---|
+| 2, projected caps (old) | 0.0140 / 0.00126 | 0.954 / 0.952 | 0.134 / 0.147 |
+| 4, linear caps | **0.0213 / 0.0211** | 0.954 / 0.952 | 0.081 / 0.073 |
+
+Tetrahedra now refine almost exactly (the minimum is the coarse TetGen value).
+Linear caps lower the pyramid minimum (the curved base bulges toward a linear
+apex), but this loss shrinks with each level (decrements 0.008 after r1) toward a
+positive limit because the cap has real height (0.5 x shortest base edge),
+unlike the earlier flat bridge cells.
+
+## 3. Third trace meshes with linear caps (generator r0-r2 + checker mode 2)
+
+Settings: radius 10, membrane 10, ogrid 12, BoxRefs 3, hex Inter, shell 3 um,
+`-skipSmoothing 1 -centerlineScale 1 -extendTerminals 0`, padding 100 um.
+
+| Mesh | Coarse V / volumes | Generation | tet r1 / r2 | hex r1 / r2 | prism r1 / r2 | pyramid r1 / r2 |
+|---|---|---|---|---|---|---|
+| 3rd third (343 um coil, 627 um with tails) | 9,652 / 27,888 | r0-r2 PASS | 0.0179 / 0.0179 | 0.967 / 0.968 | 0.469 / 0.471 | 0.157 / 0.139 |
+| 3rd full (1294 um coil, 1585 um with tails) | 23,982 / 73,379 | r0-r2 PASS | 0.0266 / 0.0266 | 0.966 / 0.978 | 0.469 / 0.470 | 0.146 / 0.136 |
+| 3rd third, projected caps (before fix) | 9,652 / 27,888 | r0-r2 PASS | 0.0077 / 0.0039 | 0.967 / 0.968 | 0.469 / 0.471 | 0.197 / 0.147 |
+
+Zero inverted or degenerate cells at every level; the worst tetrahedra of the
+full trace are now pure far-field TetGen cells (radial = 0) that refine without
+loss. r2 leaf counts: 1.80 M (third) and 4.75 M volumes (full).
+
+Outputs (not in git): `runs/rod_repair_2026-11-24/lc2/` (third_b32_lc,
+third_full/), earlier variants in `runs/rod_repair_2026-11-24/`. The folder
+`runs/rod_repair_2026-11-24/lc/` is an invalid run (zsh passed the mesh
+flags as one word; trace scaled x24) and can be deleted.
+Coarse full-third mesh for solvers: `inputs/third_trace_full_pad100/`.
+
+## 4. Known limits / next steps
+
+- The full fourth trace has not been regenerated with linear caps (checked
+  only via mode 4 on the existing coarse mesh); TetGen output varies run to run.
+- Pyramids decline mildly r1 -> r2 with linear caps (about 7-11 %); r3+ untested.
+- A throwaway extension pass (`-numRefs 0`) segfaulted inside TetGen once on
+  the rod-repaired coil; the extended SWC is written before TetGen, and the
+  final runs did not crash. TetGen robustness is not resolved.
+- The joint third+fourth mesh is not built yet (see section 1).
+- The 32 um bend radius was calibrated on these traces only.
+
+## 5. Changed files and hashes
+
+- `mesh_generation/tools/repair_trace_rod.py`, `mesh_generation/tools/rod_repair_workflow.sh` (new).
+- `plugins/neuro_collection/grid_generation/neurites_from_swc.cpp`:
+  `c61a0c30...` -> `55402eebee844c48417a62f237b8db3c3a2d4c6f7ff5aac8e15f172aff5b3fab`
+  (linear caps, checker lineage + mode 4). Pre-edit copies with SHA256SUMS:
+  `rollback_archive/2026-11-24_mesh_tet_decline_pre_edit/` (main checkout).
+  Overlay updated (`ug4_build_overlay/`); all neuro_collection hashes verified
+  against the installed tree. Rebuilt with `make neuro_collection` only.
