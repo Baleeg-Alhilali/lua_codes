@@ -168,3 +168,73 @@ Coarse full-third mesh for solvers: `inputs/third_trace_full_pad100/`.
   `rollback_archive/2026-11-24_mesh_tet_decline_pre_edit/` (main checkout).
   Overlay updated (`ug4_build_overlay/`); all neuro_collection hashes verified
   against the installed tree. Rebuilt with `make neuro_collection` only.
+
+## 6. Two traces in one shared Inter domain (later the same day)
+
+`mesh_generation/swc_to_neurite_projector_multiple_nephrons.lua` was updated
+to the true-scale pipeline:
+
+- options from the single pipeline: `-skipSmoothing`, `-interMesh hex|prism`,
+  `-prismInterThickness`, `-interFadeDistance`, the geometry-policy options,
+  structural validation of the coarse and every refined file (`-validate`);
+  defaults aligned (radius 10 / membrane 10 um, `bendChordErrorFactor` 0.01,
+  `resampleSpacing` 5, `terminalSpacing` 20, `terminalPaddingFactor` 0 — the
+  old 25 x outer radius gave a 500 um minimum box padding);
+- `-mergedSwc <file>`: a pre-merged multi-root SWC in um (the joint rod repair
+  of this script's own `_outerwall_extended.swc`); no smoothing, merging or
+  extension, `# UG4_` box metadata reused;
+- a preflight of non-local clearance within each trace and the distance
+  between traces (2 x outer / 0.9);
+- `-minPortSeparation` (default 3 x outer = 60 um), passed to
+  `extend_swc_terminals_to_outerwall.py --min-port-separation`: independent
+  nearest-cell snapping put both outlets (both on ymin) in adjacent cells
+  48.5 um apart; a later port on the same wall now moves to the nearest
+  cell centre at least that far from earlier ports.
+
+`repair_trace_rod.py` reads a merged multi-root SWC as several curves and
+writes it back as one multi-root file (joint frozen-tail repair).
+
+**C++ (`neurites_from_swc.cpp`).** The structured near-Inter shell builder
+(`add_straight_prismatic_inter_to_version2_nephron`) grouped Basolateral rings
+by axial parameter only; with two nephrons both run over [0, 1], so the rings
+mixed ("Could not propagate one-to-one Basolateral ring ordering"). Stations
+are now keyed by (nephron, axial); ring-order propagation, terminal ramps,
+curvature limits, slope limits, the sweep and the Basolateral face assignment
+stay within one tube. The TetGen fill, portal rebuild and caps were already
+global. The fade band throws for more than one nephron. The multi-nephron entry
+also enables double-precision TetGen input like the single one. Single-trace
+regression: the third segment rebuilds identically (9,652 vertices / 27,888
+volumes, same shell statistics). Hash
+`300129f941927a4ff1e031556468c8e15ecbb6af0e0f0979cdf61e8709a64ae4`; backup of
+the previous file and the multi script in
+`rollback_archive/2026-11-24_multi_nephron_pre_edit/`.
+
+**Workflow** `mesh_generation/tools/rod_repair_joint_workflow.sh`: joint coil
+repair with `--free-ends` (the raw traces end 25.5 um apart at the image edge,
+which makes fixed ends infeasible) -> multi script pass writing the merged
+extended SWC -> joint frozen-tail repair -> `-mergedSwc` mesh -> checker.
+
+**Bend 32 um failed for the joint case, 35 um passes.** With 32 um the fourth
+trace (tree 2) had 4 inverted cells at r1 (linear cap pyramid -0.0069, tet
+1e-4, hex 0.88) on the inner side of bends at R ~ 33 um; the same failure
+appeared when that tree was meshed alone with the single pipeline, so it is
+the trace geometry, not the multi-nephron code. With a 35 um target (now the
+joint workflow default):
+
+| Joint mesh (third + fourth) | value |
+|---|---|
+| traces | 1318.8 -> 1289.2 um (97.8 %), 1134.1 -> 1114.8 um (98.3 %), max move ~30 um |
+| merged preflight | bend >= 35.3 um, self-clearance >= 55.9 um, between traces 56.2 um |
+| coarse | 42,484 vertices, 122,420 volumes, validation PASS |
+| checker r1 / r2 | tet 0.00222 / 0.00222, hex 0.971 / 0.979, prism 0.469 / 0.471, pyramid 0.191 / 0.139, 0 inverted |
+| r2 size / memory | 7.93 M leaf volumes, 11.7 GB peak (checker) |
+
+The worst tetrahedron is a linear far-field TetGen cell at the inlet wall that
+refines without loss after r1. Pyramids lose ~27 % r1 -> r2 near a terminal
+(axial < 0.01, where the shell thickness ramps); the third-trace meshes show
+the same terminal-region trend (7-11 %). This is the main open quality item
+before deeper refinement. Mesh: `inputs/third_fourth_joint_pad100/`.
+
+Not done: generator r2 flat files for the joint mesh (r2 checked in memory),
+flow/transport solves, and the 32 vs 35 um choice for the single-trace meshes
+(the third-trace meshes used 32 um and passed).

@@ -5057,7 +5057,10 @@ static void add_straight_prismatic_inter_to_version2_nephron
 	// Sweep one fixed-connectivity 2-D triangulation through every Basolateral
 	// axial station. Group the existing projector-backed ring vertices by their
 	// exact axial parameter, then sort by the transported projector angle.
-	std::map<float, std::set<Vertex*> > ringVertexSets;
+	// Several nephrons (multi-nephron import) share one Inter domain: their
+	// axial parameters all run over [0, 1], so stations are keyed by
+	// (nephron, axial) and every station-pair loop below stays within one tube.
+	std::map<std::pair<uint32_t, float>, std::set<Vertex*> > ringVertexSets;
 	std::vector<Face*> basolateralQuads;
 	for (FaceIterator fit = sh.begin<Face>(2); fit != sh.end<Face>(2); ++fit)
 	{
@@ -5067,7 +5070,8 @@ static void add_straight_prismatic_inter_to_version2_nephron
 		for (size_t i = 0; i < 4; ++i)
 		{
 			Vertex* vertex = face->vertex(i);
-			ringVertexSets[aaSurfParams[vertex].axial].insert(vertex);
+			const uint32_t nid = aaSurfParams[vertex].neuriteID & ((1u << 20) - 1);
+			ringVertexSets[std::make_pair(nid, aaSurfParams[vertex].axial)].insert(vertex);
 		}
 	}
 	UG_COND_THROW(ringVertexSets.size() < 2 || basolateralQuads.empty(),
@@ -5075,7 +5079,8 @@ static void add_straight_prismatic_inter_to_version2_nephron
 
 	std::vector<std::vector<Vertex*> > rings;
 	std::vector<float> ringAxial;
-	for (std::map<float,std::set<Vertex*> >::const_iterator it =
+	std::vector<uint32_t> ringTube;
+	for (std::map<std::pair<uint32_t, float>,std::set<Vertex*> >::const_iterator it =
 	     ringVertexSets.begin(); it != ringVertexSets.end(); ++it)
 	{
 		std::vector<Vertex*> ring(it->second.begin(), it->second.end());
@@ -5091,8 +5096,21 @@ static void add_straight_prismatic_inter_to_version2_nephron
 			return angleA < angleB;
 		});
 		rings.push_back(ring);
-		ringAxial.push_back(it->first);
+		ringAxial.push_back(it->first.second);
+		ringTube.push_back(it->first.first);
 	}
+	// First/last station of the tube that contains each station.
+	std::vector<size_t> tubeFirst(rings.size()), tubeLast(rings.size());
+	size_t tubeCount = 0;
+	for (size_t s = 0; s < rings.size(); ++s)
+	{
+		tubeFirst[s] = (s > 0 && ringTube[s] == ringTube[s-1]) ? tubeFirst[s-1] : s;
+		if (tubeFirst[s] == s) ++tubeCount;
+	}
+	for (size_t s = rings.size(); s-- > 0;)
+		tubeLast[s] = (s + 1 < rings.size() && ringTube[s] == ringTube[s+1])
+			? tubeLast[s+1] : s;
+	auto sameTube = [&] (size_t a, size_t b) {return ringTube[a] == ringTube[b];};
 	const size_t angularCount = rings[0].size();
 	UG_COND_THROW(angularCount < 4,
 	              "Prismatic Inter requires at least four angular vertices.");
@@ -5103,6 +5121,7 @@ static void add_straight_prismatic_inter_to_version2_nephron
 	// neighbors occur only once.
 	for (size_t s = 1; s < rings.size(); ++s)
 	{
+		if (!sameTube(s - 1, s)) continue; // first ring of the next tube
 		std::set<Vertex*> nextSet(rings[s].begin(), rings[s].end());
 		std::vector<Vertex*> orderedNext(angularCount, NULL);
 		std::set<Vertex*> usedNext;
@@ -5181,7 +5200,7 @@ static void add_straight_prismatic_inter_to_version2_nephron
 		              "axial station.");
 	}
 	UG_COND_THROW(basolateralQuads.size() !=
-	              (rings.size() - 1) * angularCount,
+	              (rings.size() - tubeCount) * angularCount,
 	              "Basolateral quadrilateral count does not match the swept rings.");
 
 	const number boxSpan = std::max(
@@ -5190,7 +5209,7 @@ static void add_straight_prismatic_inter_to_version2_nephron
 	const number straightTolerance = std::max(
 		scaled_length_tolerance(boxSpan, tubeRadiusScale),
 		tubeRadiusScale * g_nephronGeometryPolicy.straightnessRadiusFactor);
-	bool straightZ = true;
+	bool straightZ = tubeCount == 1;
 	for (size_t s = 1; s < ringCenters.size(); ++s)
 		straightZ = straightZ &&
 			std::fabs(ringCenters[s][0] - ringCenters[0][0]) <= straightTolerance &&
@@ -5249,11 +5268,14 @@ static void add_straight_prismatic_inter_to_version2_nephron
 		{
 			const number safePortalThickness = std::min(
 				curvedInterThickness, 0.5 * tubeRadiusScale);
-			const size_t rampIntervals = std::min<size_t>(
-				2, (rings.size() - 1) / 2);
+			size_t rampIntervals = 2;
+			for (size_t s = 0; s < rings.size(); ++s)
+				rampIntervals = std::min<size_t>(rampIntervals,
+					(tubeLast[s] - tubeFirst[s]) / 2);
 			for (size_t s = 0; s < rings.size(); ++s)
 			{
-				const size_t terminalDistance = std::min(s, rings.size() - 1 - s);
+				const size_t terminalDistance = std::min(s - tubeFirst[s],
+				                                         tubeLast[s] - s);
 				if (terminalDistance > rampIntervals) continue;
 				const number t = rampIntervals == 0 ? 1.0
 					: (number)terminalDistance / (number)rampIntervals;
@@ -5273,6 +5295,7 @@ static void add_straight_prismatic_inter_to_version2_nephron
 			number minimumAppliedThickness = curvedInterThickness;
 			for (size_t s = 1; s + 1 < rings.size(); ++s)
 			{
+				if (!sameTube(s - 1, s) || !sameTube(s, s + 1)) continue;
 				const number a = VecDistance(ringCenters[s-1], ringCenters[s]);
 				const number b = VecDistance(ringCenters[s], ringCenters[s+1]);
 				const number c = VecDistance(ringCenters[s-1], ringCenters[s+1]);
@@ -5297,10 +5320,12 @@ static void add_straight_prismatic_inter_to_version2_nephron
 			// Limit the radial expansion slope to 0.35 unit per axial unit so
 			// adjacent hex slabs cannot fold while recovering to full thickness.
 			for (size_t s = 1; s < rings.size(); ++s)
+				if (sameTube(s - 1, s))
 				stationInterThickness[s] = std::min(
 					stationInterThickness[s], stationInterThickness[s-1]
 					+ 0.35 * VecDistance(ringCenters[s-1], ringCenters[s]));
 			for (size_t s = rings.size() - 1; s > 0; --s)
+				if (sameTube(s - 1, s))
 				stationInterThickness[s-1] = std::min(
 					stationInterThickness[s-1], stationInterThickness[s]
 					+ 0.35 * VecDistance(ringCenters[s-1], ringCenters[s]));
@@ -5461,6 +5486,7 @@ static void add_straight_prismatic_inter_to_version2_nephron
 		for (size_t s = 0; s + 1 < stationNodes.size(); ++s)
 			for (size_t q = 0; q < crossSectionQuads.size(); ++q)
 			{
+				if (!sameTube(s, s + 1)) break;
 				const CurvedInterQuad& quad = crossSectionQuads[q];
 				Vertex* v[8] = {
 					stationNodes[s][quad[0]], stationNodes[s][quad[1]],
@@ -5622,7 +5648,7 @@ static void add_straight_prismatic_inter_to_version2_nephron
 		FixOrientation(g, interNearVolumes.begin(), interNearVolumes.end(), aaPos);
 
 		for (size_t s = 0; s + 1 < rings.size(); ++s)
-			for (size_t i = 0; i < angularCount; ++i)
+			for (size_t i = 0; i < angularCount && sameTube(s, s + 1); ++i)
 			{
 				const size_t j = (i + 1) % angularCount;
 				FaceDescriptor fd;
@@ -5928,6 +5954,9 @@ static void add_straight_prismatic_inter_to_version2_nephron
 			g_fadeZoneVertices.clear();
 			g_adaptiveNephronMeshing.fadeStartRadial = -1.0;
 			g_adaptiveNephronMeshing.fadeEndRadial = -1.0;
+			UG_COND_THROW(g_adaptiveNephronMeshing.interFadeDistance > 0.0 && tubeCount > 1,
+			              "The Inter fade band supports a single nephron only; "
+			              "use -interFadeDistance 0 for multiple nephrons.");
 			if (g_adaptiveNephronMeshing.interFadeDistance > 0.0 && rings.size() >= 2)
 			{
 				const size_t nSt = rings.size();
@@ -10152,6 +10181,9 @@ void import_multiple_nephrons_with_membrane_and_inter_from_swc
 	 */
 	UG_COND_THROW(numNephrons < 2,
 	              "The multi-nephron importer requires at least two SWC trees.");
+	// Same as the single-nephron importer: micrometre features in millimetre
+	// coordinates need double-precision TetGen input (user value respected).
+	setenv("UG_TETGEN_DOUBLE_PRECISION", "1", 0);
 	UG_COND_THROW(lumenScaleFactor <= 0.0 || lumenScaleFactor >= 1.0,
 	              "Lumen scale factor must be strictly between 0 and 1.");
 	UG_COND_THROW(oGridVertices < 4,

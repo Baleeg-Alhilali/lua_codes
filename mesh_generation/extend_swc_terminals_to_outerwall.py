@@ -339,6 +339,39 @@ def wall_cell_center(p: Vec, axis: int, sign: int, box_min: Vec, box_max: Vec,
     return (target[0], target[1], target[2]), (indices[0], indices[1])
 
 
+def separated_wall_cell_center(p: Vec, axis: int, sign: int, box_min: Vec,
+                               box_max: Vec, box_refs: int, used_ports,
+                               min_separation: float):
+    """Nearest OuterWall cell centre that keeps ``min_separation`` from every
+    port already placed on the same wall (several nephrons in one box).
+
+    Independent nearest-cell snapping put two outlets of the true-scale
+    third/fourth traces in adjacent cells 48.5 um apart, below the 55 um
+    centreline clearance needed by the shared Inter mesh (2026-11-24)."""
+    wall, cell = wall_cell_center(p, axis, sign, box_min, box_max, box_refs)
+    others = [q for (a, sg, q) in used_ports if a == axis and sg == sign]
+    if min_separation <= 0.0 or all(distance(wall, q) >= min_separation
+                                    for q in others):
+        return wall, cell
+    cells = 1 << box_refs
+    tangential = [d for d in range(3) if d != axis]
+    candidates = []
+    for i in range(cells):
+        for j in range(cells):
+            target = list(wall)
+            for dimension, index in zip(tangential, (i, j)):
+                extent = box_max[dimension] - box_min[dimension]
+                target[dimension] = box_min[dimension] + (index + 0.5) * extent / cells
+            target = (target[0], target[1], target[2])
+            if all(distance(target, q) >= min_separation for q in others):
+                candidates.append((distance(target, wall), target, (i, j)))
+    if not candidates:
+        raise ValueError("no OuterWall cell keeps the requested port separation; "
+                         "increase --box-refs or the padding")
+    _, target, cell = min(candidates)
+    return target, cell
+
+
 def optimized_transition(p: Vec, tangent: Vec, normal: Vec, wall: Vec,
                          wall_distance: float, spacing: float,
                          radius: float, relative_tolerance: float,
@@ -411,7 +444,10 @@ def optimized_transition(p: Vec, tangent: Vec, normal: Vec, wall: Vec,
 
 def extend_chain(chain: Sequence[Node], box_min: Vec, box_max: Vec, spacing: float,
                  box_refs: int, label: str, relative_tolerance: float,
-                 direction_tolerance: float) -> tuple[list[tuple[Vec, float, int]], list[str]]:
+                 direction_tolerance: float, used_ports=None,
+                 min_port_separation: float = 0.0) -> tuple[list[tuple[Vec, float, int]], list[str]]:
+    if used_ports is None:
+        used_ports = []
     root_tangent = normalize(sub(chain[0].p, chain[1].p))
     tip_tangent = normalize(sub(chain[-1].p, chain[-2].p))
     diagnostics = []
@@ -430,7 +466,10 @@ def extend_chain(chain: Sequence[Node], box_min: Vec, box_max: Vec, spacing: flo
             endpoint.p, tangent, box_min, box_max,
             length_tolerance, direction_tolerance
         )
-        wall, cell = wall_cell_center(endpoint.p, axis, sign, box_min, box_max, box_refs)
+        wall, cell = separated_wall_cell_center(
+            endpoint.p, axis, sign, box_min, box_max, box_refs, used_ports,
+            min_port_separation)
+        used_ports.append((axis, sign, wall))
         samples, max_curvature = optimized_transition(
             endpoint.p, tangent, normal, wall, wall_distance, spacing,
             endpoint.radius, relative_tolerance, direction_tolerance
@@ -502,6 +541,10 @@ def main() -> None:
                         help="Outer-box refinement level used to center each terminal in its wall cell")
     parser.add_argument("--min-padding-factor", type=float, default=25.0,
                         help="minimum box padding as a multiple of the largest outer radius")
+    parser.add_argument("--min-port-separation", type=float, default=0.0,
+                        help="minimum distance between terminal ports on the same "
+                             "OuterWall face (mesh units; 0 = independent "
+                             "nearest-cell snapping)")
     parser.add_argument("--endpoints-only", action="store_true",
                         help="keep the SWC centerline unchanged; fit and align the box to its endpoints")
     parser.add_argument("--relative-tolerance", type=float, default=1e-10,
@@ -545,11 +588,12 @@ def main() -> None:
             for chain in chains
         ]
     else:
+        used_ports: list = []
         for index, chain in enumerate(chains, start=1):
             result, messages = extend_chain(
                 chain, box_min, box_max, args.spacing, args.box_refs,
                 f"nephron {index}", args.relative_tolerance,
-                args.direction_tolerance
+                args.direction_tolerance, used_ports, args.min_port_separation
             )
             output_chains.append(result)
             diagnostics.extend(messages)

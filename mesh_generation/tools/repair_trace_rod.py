@@ -92,6 +92,50 @@ def circumcurvature(a, b, c):
     return 2.0 * area2 / (ab * bc * ac + 1e-18)
 
 
+def read_swc_chains(path: Path) -> list[np.ndarray]:
+    """Root-to-terminal point chains of an SWC with one or more unbranched
+    trees (a merged multi-nephron SWC), in file order of the roots."""
+    nodes, order = {}, []
+    for line in path.read_text().splitlines():
+        payload = line.split("#", 1)[0].split()
+        if not payload:
+            continue
+        if len(payload) != 7:
+            raise ValueError(f"SWC line must have 7 columns: {line!r}")
+        nid, parent = int(payload[0]), int(payload[6])
+        nodes[nid] = (float(payload[2]), float(payload[3]), float(payload[4]),
+                      parent)
+        order.append(nid)
+    children: dict[int, list[int]] = {}
+    for n, v in nodes.items():
+        if v[3] != -1:
+            children.setdefault(v[3], []).append(n)
+    if any(len(c) > 1 for c in children.values()):
+        raise ValueError("branched SWC traces are not supported")
+    chains = []
+    for root in [n for n in order if nodes[n][3] == -1]:
+        chain = [root]
+        while chain[-1] in children:
+            chain.append(children[chain[-1]][0])
+        chains.append(np.array([nodes[n][:3] for n in chain], dtype=float))
+    if sum(len(c) for c in chains) != len(nodes):
+        raise ValueError("SWC contains disconnected nodes")
+    return chains
+
+
+def write_swc_chains(path: Path, chains, header, metadata=None) -> None:
+    """One multi-root SWC: every chain is its own root-to-terminal tree."""
+    lines = list(metadata or []) + [f"# {h}" for h in header]
+    nid = 0
+    for chain in chains:
+        for i, p in enumerate(chain):
+            nid += 1
+            parent = -1 if i == 0 else nid - 1
+            lines.append(f"{nid} {1 if i == 0 else 3} {p[0]:.9f} {p[1]:.9f} "
+                         f"{p[2]:.9f} 0.000000 {parent}")
+    path.write_text("\n".join(lines) + "\n")
+
+
 class Rod:
     """One or several inextensible rods solved together.
 
@@ -286,8 +330,9 @@ def repair(raws, args):
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("input", type=Path, nargs="+",
-                   help="one SWC, or several traces repaired jointly "
-                        "(clearance also enforced between traces)")
+                   help="one SWC, several traces repaired jointly (clearance "
+                        "also enforced between traces), or one merged "
+                        "multi-root SWC whose trees are repaired jointly")
     p.add_argument("-o", "--output", type=Path, nargs="+", required=True,
                    help="one output SWC per input")
     p.add_argument("--voxel-size", type=float, default=1.0,
@@ -332,7 +377,7 @@ def main(argv=None) -> int:
     p.add_argument("--verbose", action="store_true")
     a = p.parse_args(argv)
     if len(a.output) != len(a.input):
-        p.error("give one output per input")
+        p.error("give one output per input (one output for a merged SWC)")
     if a.target_length is not None and len(a.input) > 1:
         p.error("--target-length applies to single-trace runs")
     if a.min_curvature_radius is None:
@@ -340,10 +385,21 @@ def main(argv=None) -> int:
     if a.exclusion_arclength is None:
         a.exclusion_arclength = max(4 * a.outer_radius, 4 * a.output_spacing)
 
-    raws = [read_unbranched_swc(f) * a.voxel_size for f in a.input]
+    merged = len(a.input) == 1 and len(read_swc_chains(a.input[0])) > 1
+    if merged:
+        # One merged multi-root SWC (e.g. the OuterWall-extended output of
+        # swc_to_neurite_projector_multiple_nephrons.lua): repair its trees
+        # jointly and write them back as one multi-root SWC.
+        raws = [c * a.voxel_size for c in read_swc_chains(a.input[0])]
+        sources = [Path(f"{a.input[0]}#tree{k + 1}") for k in range(len(raws))]
+        outputs = [a.output[0]] * len(raws)
+    else:
+        raws = [read_unbranched_swc(f) * a.voxel_size for f in a.input]
+        sources, outputs = a.input, a.output
     outs, rods, infos, history = repair(raws, a)
     reports = []
-    for f, o, raw, out, rod, info in zip(a.input, a.output, raws, outs, rods,
+    headers = []
+    for f, o, raw, out, rod, info in zip(sources, outputs, raws, outs, rods,
                                          infos):
         before = audit(resample(raw, a.output_spacing), a.exclusion_arclength)
         after = audit(out, a.exclusion_arclength)
@@ -351,7 +407,7 @@ def main(argv=None) -> int:
         report = {
             "input": str(f), "output": str(o),
             "method": "inextensible rod (repair_trace_rod.py)",
-            "joint_with": [str(g) for g in a.input if g != f],
+            "joint_with": [str(g) for g in sources if g != f],
             "targets": {"clearance_um": a.clearance,
                         "min_curvature_radius_um": a.min_curvature_radius,
                         "exclusion_arclength_um": a.exclusion_arclength},
@@ -359,18 +415,18 @@ def main(argv=None) -> int:
             "length_retained_vs_raw": after["length_um"] / info["raw_length_um"],
             **info,
         }
-        if len(a.input) > 1:
+        if len(sources) > 1:
             report["min_cross_trace_distance_um"] = \
                 history[-1]["min_cross_curve_distance_um"]
             report["before_min_cross_trace_distance_um"] = cross_distance(
                 [resample(r, a.output_spacing) for r in raws])
         reports.append(report)
-        meta = [] if a.free_ends else read_ug4_metadata(f)
+        meta = [] if a.free_ends else read_ug4_metadata(a.input[0] if merged else f)
         header = [
             "Length-preserving repair from repair_trace_rod.py (inextensible rod)",
             f"SOURCE: {f}",
             *([f"JOINT_WITH: {' '.join(report['joint_with'])}"]
-              if len(a.input) > 1 else []),
+              if len(sources) > 1 else []),
             "UNITS: micrometres (run the mesh pipeline with -centerlineScale 1 -skipSmoothing 1)",
             f"VOXEL_SIZE_UM: {a.voxel_size}",
             f"TARGETS: clearance={a.clearance:.4f} minCurvatureRadius="
@@ -381,7 +437,15 @@ def main(argv=None) -> int:
             f"AFTER: {json.dumps(after)}",
             f"DISPLACEMENT: {json.dumps(disp)}",
         ]
-        write_swc(o, out, header, meta)
+        headers.append((header, meta))
+        if not merged:
+            write_swc(o, out, header, meta)
+    if merged:
+        header = ["Joint length-preserving repair of a merged multi-root SWC "
+                  "(repair_trace_rod.py)",
+                  "UNITS: micrometres"] + [
+            f"TREE {k + 1}: {h[0][6]} {h[0][8]}" for k, h in enumerate(headers)]
+        write_swc_chains(a.output[0], outs, header, headers[0][1])
     full = reports[0] if len(reports) == 1 else {"traces": reports,
                                                   "stages": history}
     if a.report:
