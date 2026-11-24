@@ -1,0 +1,29 @@
+{
+  "input": "Nephron traces/4th_trace_third.swc",
+  "voxel_size_um": 1.0,
+  "targets": {
+    "clearance_um": 55.0,
+    "min_curvature_radius_um": 28.0,
+    "exclusion_arclength_um": 80.0,
+    "outer_radius_um": 20.0,
+    "inter_shell_um": 3.0
+  },
+  "iterations": 31,
+  "before": {
+    "length_um": 371.8873762553927,
+    "min_curvature_radius_um": 3.3186682459685533,
+    "min_nonlocal_distance_um": 47.81293665178851,
+    "raw_polyline_length_um": 380.5058025279493
+  },
+  "after": {
+    "length_um": 343.0975436878041,
+    "min_curvature_radius_um": 28.255429416219492,
+    "min_nonlocal_distance_um": 57.416775991243476
+  },
+  "displacement": {
+    "max_displacement_um": 8.528941187330803,
+    "mean_displacement_um": 2.0354635382301813,
+    "fraction_moved_over_2um": 0.3795811518324607
+  },
+  "length_change_percent": -7.741546071684158
+}

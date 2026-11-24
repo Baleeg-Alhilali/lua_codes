@@ -1,0 +1,223 @@
+diff --git a/incompressible/fv1/bnd/wall_sliding_fv1.cpp b/incompressible/fv1/bnd/wall_sliding_fv1.cpp
+index 6e8f63b..2cba045 100644
+--- a/incompressible/fv1/bnd/wall_sliding_fv1.cpp
++++ b/incompressible/fv1/bnd/wall_sliding_fv1.cpp
+@@ -72,6 +72,22 @@ set_sliding_factor(const char* fctName)
+ }
+ #endif
+ 
++template<typename TDomain>
++void NavierStokesWSBCFV1<TDomain>::
++set_normal_factor(number val)
++{
++	m_imNormalFactor.set_data(make_sp(new ConstUserNumber<dim>(val)));
++}
++
++#ifdef UG_FOR_LUA
++template<typename TDomain>
++void NavierStokesWSBCFV1<TDomain>::
++set_normal_factor(const char* fctName)
++{
++	m_imNormalFactor.set_data(LuaUserDataFactory<number, dim>::create(fctName));
++}
++#endif
++
+ template<typename TDomain>
+ void NavierStokesWSBCFV1<TDomain>::
+ set_sliding_limit(number val)
+@@ -137,6 +153,10 @@ prep_elem_loop(const ReferenceObjectID roid, const int si)
+ 		UG_THROW("NavierStokesWSBCFV1::prep_elem_loop:"
+ 						" Sliding Factor has not been set, but is required.\n");
+ 
++	if(!m_imNormalFactor.data_given())
++		UG_THROW("NavierStokesWSBCFV1::prep_elem_loop:"
++						" Normal Factor has not been set, but is required.\n");
++
+ //  check if sliding limit has been set
+ 	if(!m_imSlidingLimit.data_given())
+ 		UG_THROW("NavierStokesWSBCFV1::prep_elem_loop:"
+@@ -221,6 +241,9 @@ prep_elem(const LocalVector& u, GridObject* elem, const ReferenceObjectID roid,
+ 
+ 	m_imSlidingFactor.set_local_ips(&m_vLocIP[0], m_vLocIP.size());
+ 	m_imSlidingFactor.set_global_ips(&m_vGloIP[0], m_vGloIP.size());
++
++	m_imNormalFactor.set_local_ips(&m_vLocIP[0], m_vLocIP.size());
++	m_imNormalFactor.set_global_ips(&m_vGloIP[0], m_vGloIP.size());
+ }
+ 
+ template<typename TDomain>
+@@ -301,7 +324,7 @@ add_jac_A_elem(LocalMatrix& J, const LocalVector& u, GridObject* elem, const Mat
+ 		//  Calculate u_{||} = (u - (u \cdot n) \cdot n)
+ 			for(size_t d1 = 0; d1 < (size_t)dim; ++d1)
+ 				for(size_t d2 = 0; d2 < (size_t)dim; ++d2)
+-					for(size_t sh = 0; sh < (size_t)dim; ++sh)
++					for(size_t sh = 0; sh < bf->num_sh(); ++sh)
+ 						parallelVel(d1,d2) -= bf->shape(sh)*normal[d1]*normal[d2];
+ 			
+ 		//  Add k \cdot u_{||} to local Jacobian
+@@ -309,9 +332,20 @@ add_jac_A_elem(LocalMatrix& J, const LocalVector& u, GridObject* elem, const Mat
+ 				for(size_t d2 = 0; d2 < (size_t)dim; ++d2)
+ 					for(size_t sh = 0; sh < bf->num_sh(); ++sh)
+ 					{
+-						J(d1, bf->node_id(), d2, sh) += (-1.0) * parallelVel(d1,d2) * m_imSlidingFactor[ip];
++						J(d1, bf->node_id(), d2, sh) += parallelVel(d1,d2)
++							* bf->shape(sh) * m_imSlidingFactor[ip] * bf->volume();
+ 					}
+ 
++			// Add R_n (u.n) n to the Jacobian.  Unlike a generic Neumann
++			// datum this is assembled implicitly and therefore supplies a true
++			// porous-layer impedance in the interface-normal direction.
++			for(int d1 = 0; d1 < dim; ++d1)
++				for(int d2 = 0; d2 < dim; ++d2)
++					for(size_t sh = 0; sh < bf->num_sh(); ++sh)
++						J(d1, bf->node_id(), d2, sh) +=
++							m_imNormalFactor[ip] * normal[d1] * normal[d2]
++							* bf->shape(sh) * bf->volume();
++
+ 			////////////////////////////////////////////////////
+ 			// Add sliding limit part
+ 			////////////////////////////////////////////////////
+@@ -401,7 +435,7 @@ add_def_A_elem(LocalVector& d, const LocalVector& u, GridObject* elem, const Mat
+ 			for(size_t d1 = 0; d1 < (size_t)dim; ++d1)
+ 			{
+ 				parallelVel[d1] = 0.0;
+-				for(size_t sh = 0; sh < (size_t)dim; ++sh)
++				for(size_t sh = 0; sh < bf->num_sh(); ++sh)
+ 				{
+ 					parallelVel[d1] += u(d1, sh) * bf->shape(sh);
+ 				}
+@@ -410,7 +444,18 @@ add_def_A_elem(LocalVector& d, const LocalVector& u, GridObject* elem, const Mat
+ 			VecScaleAppend(parallelVel, -VecDot(parallelVel, normal), normal);
+ 
+ 			for(int d1 = 0; d1 < dim; ++d1)
+-				d(d1, bf->node_id()) += (-1.0) * parallelVel[d1] * m_imSlidingFactor[ip];
++				d(d1, bf->node_id()) += parallelVel[d1]
++					* m_imSlidingFactor[ip] * bf->volume();
++
++			MathVector<dim> boundaryVel;
++			VecSet(boundaryVel, 0.0);
++			for(size_t sh = 0; sh < bf->num_sh(); ++sh)
++				for(int d1 = 0; d1 < dim; ++d1)
++					boundaryVel[d1] += u(d1, sh) * bf->shape(sh);
++			const number normalVel = VecDot(boundaryVel, normal);
++			for(int d1 = 0; d1 < dim; ++d1)
++				d(d1, bf->node_id()) += m_imNormalFactor[ip] * normalVel
++					* normal[d1] * bf->volume();
+ 
+ 
+ 			////////////////////////////////////////////////////
+@@ -497,11 +542,13 @@ NavierStokesWSBCFV1(SmartPtr< IncompressibleNavierStokesBase<TDomain> > spMaster
+ 	this->register_import(m_imKinViscosity);
+ 	this->register_import(m_imDensity);
+ 	this->register_import(m_imSlidingFactor);
++	this->register_import(m_imNormalFactor);
+ 	this->register_import(m_imSlidingLimit);
+ 
+ //	initialize the imports from the master discretization
+ 	m_imKinViscosity.set_data(spMaster->kinematic_viscosity ());
+ 	m_imDensity.set_data(spMaster->density ());
++	m_imNormalFactor.set_data(make_sp(new ConstUserNumber<dim>(0.0)));
+ 
+ //	register assemble functions
+ 	this->register_all_funcs(false);
+diff --git a/incompressible/fv1/bnd/wall_sliding_fv1.h b/incompressible/fv1/bnd/wall_sliding_fv1.h
+index 7a5cf38..fe1eb84 100644
+--- a/incompressible/fv1/bnd/wall_sliding_fv1.h
++++ b/incompressible/fv1/bnd/wall_sliding_fv1.h
+@@ -105,6 +105,12 @@ class NavierStokesWSBCFV1
+ 		void set_sliding_factor(const char* fctName);
+ #endif
+ 
++	/// sets the normal Robin resistance (zero gives the original WSBC)
++		void set_normal_factor(number val);
++#ifdef UG_FOR_LUA
++		void set_normal_factor(const char* fctName);
++#endif
++
+ 	///	sets the sliding limit
+ 	/**
+ 	 * This method sets the sliding limit parameter.
+@@ -167,6 +173,8 @@ class NavierStokesWSBCFV1
+ 		DataImport<number, dim> m_imDensity;
+ 	/// Data import for sliding factor
+ 		DataImport<number, dim> m_imSlidingFactor;
++	/// Data import for the normal Robin resistance
++		DataImport<number, dim> m_imNormalFactor;
+ 	/// Data import for sliding limit
+ 		DataImport<number, dim> m_imSlidingLimit;
+ 	/// Boundary integration points of the viscosity and the density
+diff --git a/incompressible/fv1/navier_stokes_fv1.cpp b/incompressible/fv1/navier_stokes_fv1.cpp
+index a5b103e..45def0c 100644
+--- a/incompressible/fv1/navier_stokes_fv1.cpp
++++ b/incompressible/fv1/navier_stokes_fv1.cpp
+@@ -62,6 +62,8 @@ NavierStokesFV1<TDomain>::NavierStokesFV1(const std::vector<std::string>& vFct,
+ template<typename TDomain>
+ void NavierStokesFV1<TDomain>::init()
+ {
++	m_bVelocityIPExplicit = false;
++
+ //	check number of functions
+ 	if(this->num_fct() != dim+1)
+ 		UG_THROW("Wrong number of functions: The ElemDisc 'NavierStokes'"
+@@ -1113,6 +1115,11 @@ ex_velocity_ip(MathVector<dim> vValue[],
+         bool bDeriv,
+         std::vector<std::vector<MathVector<dim> > > vvvDeriv[])
+ {
++    // The same export also has a generic-IP fallback below.  Apply the
++    // explicit-coupling switch before either branch so no flow derivatives
++    // can leak into a one-way transport Jacobian.
++    bDeriv = bDeriv && !m_bVelocityIPExplicit;
++
+     if(bDeriv)
+     {
+         for(size_t ip = 0; ip < nip; ++ip)
+diff --git a/incompressible/fv1/navier_stokes_fv1.h b/incompressible/fv1/navier_stokes_fv1.h
+index 4821803..6ae06cc 100644
+--- a/incompressible/fv1/navier_stokes_fv1.h
++++ b/incompressible/fv1/navier_stokes_fv1.h
+@@ -182,6 +182,10 @@ class NavierStokesFV1
+ 	/// returns scvf source
+ 		DataImport<MathVector<dim>, dim> sourceSCVF(){ return m_imSourceSCVF;}
+ 
++	/// Treat velocity_ip() as an explicit one-way transport coefficient.
++		void set_velocity_ip_explicit(bool explicitCoupling)
++			{m_bVelocityIPExplicit = explicitCoupling;}
++
+ 	///	sets the stabilization used to compute the stabilized velocities
+ 		void set_stabilization(SmartPtr<INavierStokesFV1Stabilization<dim> > spStab)
+ 			{m_spStab = spStab;}
+@@ -232,6 +236,9 @@ class NavierStokesFV1
+     using base_type::m_exPressure;
+     using base_type::m_exPressureGrad;
+ 
++	/// Suppress export derivatives for one-way flow-to-transport coupling.
++		bool m_bVelocityIPExplicit;
++
+ 
+ 	public:
+ 	///	type of trial space for each function used
+diff --git a/incompressible/fv1/register_fv1.cpp b/incompressible/fv1/register_fv1.cpp
+index f800258..1baeaab 100644
+--- a/incompressible/fv1/register_fv1.cpp
++++ b/incompressible/fv1/register_fv1.cpp
+@@ -179,6 +179,8 @@ static void Domain(Registry& reg, string grp)
+ 			.add_method("set_upwind",  static_cast<void (T::*)(SmartPtr<INavierStokesUpwind<dim> >)>(&T::set_upwind))
+ 			.add_method("set_upwind",  static_cast<void (T::*)(const std::string&)>(&T::set_upwind))
+ 			.add_method("set_pac_upwind", &T::set_pac_upwind, "", "Set pac upwind")
++			.add_method("set_velocity_ip_explicit", &T::set_velocity_ip_explicit,
++			            "Use velocity_ip as a one-way coefficient", "Explicit")
+ 			.set_construct_as_smart_pointer(true);
+ 		reg.add_class_to_group(name, "NavierStokesFV1", tag);
+ 	}
+@@ -217,9 +219,11 @@ static void Domain(Registry& reg, string grp)
+ 			.add_method("add", &T::add, "", "Subset(s)")
+ 			.add_method("set_sliding_limit", static_cast<void (T::*)(number)>(&T::set_sliding_limit), "", "SlidingLimit")
+ 			.add_method("set_sliding_factor", static_cast<void (T::*)(number)>(&T::set_sliding_factor), "", "SlidingFactor")
++			.add_method("set_normal_factor", static_cast<void (T::*)(number)>(&T::set_normal_factor), "", "NormalFactor")
+ #ifdef UG_FOR_LUA
+ 			.add_method("set_sliding_limit", static_cast<void (T::*)(const char*)>(&T::set_sliding_limit), "", "SlidingLimit")
+ 			.add_method("set_sliding_factor", static_cast<void (T::*)(const char*)>(&T::set_sliding_factor), "", "SlidingFactor")
++			.add_method("set_normal_factor", static_cast<void (T::*)(const char*)>(&T::set_normal_factor), "", "NormalFactor")
+ #endif
+ 			.set_construct_as_smart_pointer(true);
+ 		reg.add_class_to_group(name, "NavierStokesWSBCFV1", tag);

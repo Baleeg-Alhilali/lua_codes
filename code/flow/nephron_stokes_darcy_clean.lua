@@ -19,7 +19,7 @@ ug_load_script("util/load_balancing_util.lua")
 dim = 3
 
 numRefs = util.GetParamNumber("-numRefs", 2, "number of refinements")
-gridName = "runs/third_trace_mesh_hex.ugx"
+gridName = "/Users/alhilaba/Documents/Promesh_swc/Model/runs/third_trace_third_hex_sim_ready.ugx"
 -- Previous mesh: gridName = "runs/third_trace_restored_t3.ugx"
 outputName = util.GetParam(
     "-output", "Results_final/nephron_flow_r" .. numRefs,
@@ -29,15 +29,20 @@ outputName = util.GetParam(
 -- Internal unit system: millimetres and seconds.
 -- Velocity: mm/s; kinematic pressure: mm^2/s^2; permeability: mm^2.
 
--- Inlet geometry and velocity
-inletCenterX = 7.757994361
-inletCenterY = 11.344866557
-inletCenterZ = 5.588
+-- Inlet geometry and flow rate.  The paper supplies Q, while the 3-D Stokes
+-- boundary needs velocity.  For a circular Poiseuille profile,
+-- u_mean = Q/(pi R^2) and u_max = 2*u_mean.
+inletCenterX = 7.74237
+inletCenterY = 11.3605
+inletCenterZ = 5.538
 inletDirectionX = 0.0
 inletDirectionY = 0.0
 inletDirectionZ = 1.0
 inletRadius = 1.0e-2
-maximumInletVelocity = 3.0
+inletFlowRate = 5.0e-4                    -- [mm^3/s] = 30 nL/min
+meanInletVelocity = inletFlowRate /
+    (math.pi * inletRadius * inletRadius)
+maximumInletVelocity = 2.0 * meanInletVelocity
 
 -- Previous third_trace_restored_t3.ugx inlet:
 -- center = (7.82522082, 11.24569434, 5.583) mm
@@ -73,6 +78,12 @@ print("Steady nephron Stokes--Darcy flow")
 print("Grid: " .. gridName)
 print("Refinements: " .. numRefs)
 print("MPI processes: " .. NumProcs())
+print(string.format(
+    "Inlet: Q=%.6e mm^3/s (%.6g nL/min), R=%.6e mm, " ..
+    "u_mean=%.6e mm/s, u_max=%.6e mm/s",
+    inletFlowRate, inletFlowRate * 6.0e4, inletRadius,
+    meanInletVelocity, maximumInletVelocity
+))
 
 --------------------------------------------------------------------------------
 -- Domain and approximation space
@@ -184,7 +195,14 @@ stokesInlet = NavierStokesInflow(stokesEq)
 stokesInlet:add("InletVelocity", "Inlet")
 
 stokesOpenBoundary = NavierStokesNoNormalStressOutflow(stokesEq)
-stokesOpenBoundary:add("Outlet,Apical")
+-- Outlet only (2026-11-24): on Apical, the continuity term (u.n |face|) of
+-- this condition was a mass sink after the PressureTraceConstraint merge,
+-- because the lumen and membrane control volumes around an interface node
+-- form one union CV whose Apical face is internal; the removed fluid never
+-- entered the membrane (4.1% of Q at r2 with K_mem 7e-12 mm^2).  Its
+-- tangential viscous flux also double-counted with the BJS friction.  Apical
+-- keeps the Darcy traction (Neumann), BJS friction and normal impedance.
+stokesOpenBoundary:add("Outlet")
 
 stokesRim = NavierStokesWall(stokesEq)
 stokesRim:add("TripleJunction")

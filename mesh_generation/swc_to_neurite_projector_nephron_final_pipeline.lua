@@ -34,6 +34,10 @@ cfg.out = util.GetParam("-out", MODEL_ROOT .. "/runs/" .. input_stem .. ".ugx")
 cfg.smoother = util.GetParam("-smoother",
 	script_dir .. "/quadratic_interpolate_swc.py")
 cfg.readySwc = util.GetParam("-readySwc", "")
+-- Use the input centreline exactly as supplied (for example a trace already
+-- repaired by tools/repair_trace_clearance.py).  The corner smoother is then
+-- skipped, so it cannot shorten the path or undo the clearance repair.
+cfg.skipSmoothing = util.GetParamNumber("-skipSmoothing", 0) ~= 0
 cfg.extendTerminals = util.GetParamNumber("-extendTerminals", 1) ~= 0
 -- Keep the supplied centerline exactly unchanged and fit the structured
 -- OuterWall grid to its endpoints. The grid bounds are translated so each
@@ -108,6 +112,15 @@ cfg.paddingZ = util.GetParamNumber("-paddingZ", cfg.padding)
 cfg.prismInterThickness = util.GetParamNumber(
 	"-prismInterThickness", 20.0)
 cfg.interQuality = util.GetParamNumber("-interQuality", 2.0)
+-- Width (um) of an optional smooth curved-to-linear fade from the hex
+-- near-Inter shell into the tetrahedral Inter.  Refinement nodes in this band
+-- move partially onto the curved nephron map.  Default 0 (off): on the
+-- true-scale fourth trace the outward pyramid caps already give a smooth
+-- curved surface and all cell types keep their quality from r1 to r2
+-- (tetrahedra 0.0195 at both), whereas a 10 um fade settled at 1e-4 because
+-- tube-coordinate interpolation offsets (~0.4 um on 10 um edges) exceed the
+-- thickness of the coarse TetGen slivers next to the caps (2026-11-23).
+cfg.interFadeDistance = util.GetParamNumber("-interFadeDistance", 0.0)
 -- Dimensionless geometry policy. Physical tolerances are derived in C++ from
 -- the local tube radius, Basolateral edge length, or box-cell size and are
 -- bounded below by machine precision times the global domain scale.
@@ -439,9 +452,27 @@ local smooth_command = table.concat({
 	"> /dev/null"
 }, " ")
 
-local smooth_ok = os.execute(smooth_command)
-assert(smooth_ok == true or smooth_ok == 0,
-	"quadratic_interpolate_swc.py failed")
+if cfg.skipSmoothing then
+	-- Copy the supplied trace verbatim to the output-specific ready SWC.
+	local src = assert(io.open(cfg.swc, "r"), "Cannot open SWC: " .. cfg.swc)
+	local text = src:read("*a")
+	src:close()
+	local dst = assert(io.open(ready_swc, "w"),
+		"Cannot write ready SWC: " .. ready_swc)
+	dst:write(text)
+	dst:close()
+	print("Smoothing skipped: using " .. cfg.swc .. " unchanged")
+else
+	local smooth_ok = os.execute(smooth_command)
+	assert(smooth_ok == true or smooth_ok == 0,
+		"quadratic_interpolate_swc.py failed")
+end
+if cfg.centerlineScale ~= 1.0 then
+	print(string.format(
+		"WARNING: -centerlineScale %.6g multiplies the trace length; use 1 " ..
+		"for SWC coordinates already in micrometres (1 um voxels).",
+		cfg.centerlineScale))
+end
 
 local import_swc = ready_swc
 local outer_radius = cfg.radius
@@ -466,6 +497,8 @@ configure_adaptive_nephron_meshing(
 	cfg.interFarDistanceFactor, cfg.interFarEdgeFactor,
 	cfg.interMesh == "prism",
 	cfg.prismInterThickness * MESH_LENGTH_SCALE)
+assert(cfg.interFadeDistance >= 0.0, "interFadeDistance must be >= 0")
+configure_nephron_inter_fade(cfg.interFadeDistance * MESH_LENGTH_SCALE)
 configure_nephron_geometry_policy(
 	cfg.coordinateRelTol, cfg.containmentRelTol, cfg.parameterTol,
 	cfg.mergeRadiusFactor, cfg.terminalSnapRadiusFactor,
@@ -533,6 +566,7 @@ print("Graded Inter: " .. tostring(cfg.gradedInter) .. ", edge factors "
 	.. cfg.interFarDistanceFactor)
 print("Inter mesh topology: " .. cfg.interMesh)
 print("Structured near-Inter thickness (um): " .. cfg.prismInterThickness)
+print("Inter curved-to-linear fade distance (um): " .. cfg.interFadeDistance)
 print("Geometry policy: coordinate/containment/parameter tolerances "
 	.. cfg.coordinateRelTol .. " / " .. cfg.containmentRelTol .. " / "
 	.. cfg.parameterTol .. "; merge/radius=" .. cfg.mergeRadiusFactor

@@ -14,22 +14,22 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 MODEL = HERE.parent
-RESULTS = MODEL / "sweep_results" / "mesh_parameter_sweep_r10_t10_prism20_2026-11-21"
+RESULTS = MODEL / "sweep_results" / "mesh_parameter_sweep_r10_t10_hex10_20_r0_r1_2026-11-22"
 LOGS = RESULTS / "logs"
-TEMP = MODEL / "runs" / "mesh_parameter_sweep_tmp"
+TEMP = MODEL / "runs" / "mesh_parameter_sweep_hex10_20_tmp"
 CSV_PATH = RESULTS / "mesh_parameter_sweep.csv"
 MD_PATH = RESULTS / "mesh_parameter_sweep.md"
 UGSHELL = Path("/Users/alhilaba/UG4_promesh_ogrid/bin/ugshell")
 SCRIPT = "swc_to_neurite_projector_nephron_final_pipeline.lua"
 
 OGRIDS = (6, 8, 10)
-BOX_REFS = (2, 3, 4)
+BOX_REFS = (3, 2, 4)
 ANISOTROPIES = (4, 6, 8)
-BEND_ANISOTROPIES = (1, 2, 4)
+INTER_THICKNESSES = (10, 20)
 FIELDS = (
-    "ogrid", "BoxRefs", "anisotropy", "bendAnisotropy",
+    "ogrid", "BoxRefs", "anisotropy", "interThickness_um",
     "r0_vertices", "r0_volumes", "r1_vertices", "r1_volumes",
-    "r2_vertices", "r2_volumes", "status",
+    "status",
 )
 TOKEN_RE = re.compile(rb"\S+")
 VOLUME_TAGS = {
@@ -105,7 +105,7 @@ def read_completed() -> dict[tuple[int, int, int, int], dict[str, str]]:
         return {
             (
                 int(row["ogrid"]), int(row["BoxRefs"]),
-                int(row["anisotropy"]), int(row["bendAnisotropy"]),
+                int(row["anisotropy"]), int(row["interThickness_um"]),
             ): row
             for row in csv.DictReader(stream)
         }
@@ -114,7 +114,7 @@ def read_completed() -> dict[tuple[int, int, int, int], dict[str, str]]:
 def write_outputs(rows: list[dict[str, object]]) -> None:
     rows.sort(key=lambda row: (
         int(row["ogrid"]), int(row["BoxRefs"]),
-        int(row["anisotropy"]), int(row["bendAnisotropy"]),
+        int(row["anisotropy"]), int(row["interThickness_um"]),
     ))
     with CSV_PATH.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=FIELDS)
@@ -122,40 +122,37 @@ def write_outputs(rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
     with MD_PATH.open("w", encoding="utf-8") as stream:
         stream.write("# Nephron mesh parameter sweep\n\n")
-        stream.write("| ogrid | BoxRefs | anisotropy | bendAnisotropy | R0 vertices | R0 volumes | R1 vertices | R1 volumes | R2 vertices | R2 volumes | status |\n")
-        stream.write("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---|\n")
+        stream.write("| ogrid | BoxRefs | anisotropy | Inter hex thickness (um) | R0 vertices | R0 volumes | R1 vertices | R1 volumes | status |\n")
+        stream.write("|---:|---:|---:|---:|---:|---:|---:|---:|:---|\n")
         for row in rows:
             stream.write(
-                "| {ogrid} | {BoxRefs} | {anisotropy} | {bendAnisotropy} | "
+                "| {ogrid} | {BoxRefs} | {anisotropy} | {interThickness_um} | "
                 "{r0_vertices} | {r0_volumes} | {r1_vertices} | {r1_volumes} | "
-                "{r2_vertices} | {r2_volumes} | {status} |\n".format(**row)
+                "{status} |\n".format(**row)
             )
 
 
-def run_case(ogrid: int, box_refs: int, anisotropy: int, bend: int) -> dict[str, object]:
-    case = f"o{ogrid}_b{box_refs}_a{anisotropy}_ba{bend}"
+def run_case(
+    ogrid: int, box_refs: int, anisotropy: int, prism_thickness: int
+) -> dict[str, object]:
+    case = f"o{ogrid}_b{box_refs}_a{anisotropy}_hit{prism_thickness}"
     output = TEMP / f"{case}.ugx"
     log_path = LOGS / f"{case}.log"
     command = [
         str(UGSHELL), "-ex", SCRIPT, "--",
         "-swc", "../Nephron traces/3rd_trace_243_third.swc",
-        "-radius", "10", "-membraneThickness", "10",
-        "-centerlineScale", "24", "-resampleSpacing", "5",
-        "-extendTerminals", "1", "-useTraceEndpoints", "0",
-        "-terminalSpacing", "20", "-terminalPaddingFactor", "0",
-        "-padding", "200", "-BoxRefs", str(box_refs),
+        "-BoxRefs", str(box_refs),
         "-anisotropy", str(anisotropy),
-        "-bendAnisotropy", str(bend),
-        "-bendChordErrorFactor", "0.01", "-ogrid", str(ogrid),
-        "-interMesh", "prism", "-prismInterThickness", "20",
-        "-interNearEdgeFactor", "2",
-        "-interFarEdgeFactor", "6", "-interNearDistanceFactor", "1.5",
-        "-interFarDistanceFactor", "6", "-numRefs", "2",
+        "-ogrid", str(ogrid),
+        "-interMesh", "hex",
+        "-prismInterThickness", str(prism_thickness),
+        "-numRefs", "1",
         "-out", str(output),
     ]
     row: dict[str, object] = {
         "ogrid": ogrid, "BoxRefs": box_refs,
-        "anisotropy": anisotropy, "bendAnisotropy": bend,
+        "anisotropy": anisotropy,
+        "interThickness_um": prism_thickness,
     }
     cleanup_temp()
     try:
@@ -164,22 +161,19 @@ def run_case(ogrid: int, box_refs: int, anisotropy: int, bend: int) -> dict[str,
                 command, cwd=HERE, stdout=log, stderr=subprocess.STDOUT,
                 timeout=3600, check=False,
             )
-        paths = [output, output.with_name(output.stem + "_refined_1.ugx"),
-                 output.with_name(output.stem + "_refined_2.ugx")]
+        paths = [output, output.with_name(output.stem + "_refined_1.ugx")]
         if completed.returncode != 0 or not all(path.exists() for path in paths):
             raise RuntimeError(f"ugshell exit={completed.returncode}")
         stats = [mesh_stats(path) for path in paths]
         row.update({
             "r0_vertices": stats[0][0], "r0_volumes": stats[0][1],
             "r1_vertices": stats[1][0], "r1_volumes": stats[1][1],
-            "r2_vertices": stats[2][0], "r2_volumes": stats[2][1],
             "status": "PASS",
         })
     except Exception as error:  # every failed configuration is a CRASH row
         row.update({
             "r0_vertices": "CRASH", "r0_volumes": "CRASH",
             "r1_vertices": "CRASH", "r1_volumes": "CRASH",
-            "r2_vertices": "CRASH", "r2_volumes": "CRASH",
             "status": f"CRASH ({error})",
         })
     finally:
@@ -194,13 +188,14 @@ def main() -> None:
     completed = read_completed()
     rows: list[dict[str, object]] = list(completed.values())
     combinations = list(itertools.product(
-        OGRIDS, BOX_REFS, ANISOTROPIES, BEND_ANISOTROPIES
+        OGRIDS, BOX_REFS, ANISOTROPIES, INTER_THICKNESSES
     ))
     for index, values in enumerate(combinations, 1):
         if values in completed:
             continue
         print(f"[{index}/{len(combinations)}] ogrid={values[0]} BoxRefs={values[1]} "
-              f"anisotropy={values[2]} bendAnisotropy={values[3]}", flush=True)
+              f"anisotropy={values[2]} interHexThickness={values[3]}",
+              flush=True)
         row = run_case(*values)
         print(f"  {row['status']}", flush=True)
         rows.append(row)

@@ -1,0 +1,29 @@
+{
+  "input": "/Users/alhilaba/Documents/Promesh_swc/Model/runs/true_scale_trace/fourth/rc28c55_p1_outerwall_extended.swc",
+  "voxel_size_um": 1000.0,
+  "targets": {
+    "clearance_um": 55.0,
+    "min_curvature_radius_um": 28.0,
+    "exclusion_arclength_um": 80.0,
+    "outer_radius_um": 20.0,
+    "inter_shell_um": 3.0
+  },
+  "iterations": 8,
+  "before": {
+    "length_um": 824.2468225374522,
+    "min_curvature_radius_um": 14.462307435430342,
+    "min_nonlocal_distance_um": 57.36628696460296,
+    "raw_polyline_length_um": 825.1123470833862
+  },
+  "after": {
+    "length_um": 821.6735208492912,
+    "min_curvature_radius_um": 28.049547413955246,
+    "min_nonlocal_distance_um": 56.80160448042192
+  },
+  "displacement": {
+    "max_displacement_um": 1.2466465858453346,
+    "mean_displacement_um": 0.16409460207089252,
+    "fraction_moved_over_2um": 0.0
+  },
+  "length_change_percent": -0.3122003770956727
+}

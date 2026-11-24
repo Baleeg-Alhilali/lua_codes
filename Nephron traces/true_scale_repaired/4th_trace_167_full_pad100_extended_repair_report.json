@@ -1,0 +1,29 @@
+{
+  "input": "/Users/alhilaba/Documents/Promesh_swc/Model/runs/fourth_trace_full_short_ext/pad100_p1_outerwall_extended.swc",
+  "voxel_size_um": 1000.0,
+  "targets": {
+    "clearance_um": 55.0,
+    "min_curvature_radius_um": 28.04878048780488,
+    "exclusion_arclength_um": 80.0,
+    "outer_radius_um": 20.0,
+    "inter_shell_um": 3.0
+  },
+  "iterations": 46,
+  "before": {
+    "length_um": 1221.5596496514295,
+    "min_curvature_radius_um": 19.963397719761623,
+    "min_nonlocal_distance_um": 56.60358949914368,
+    "raw_polyline_length_um": 1222.7715093318595
+  },
+  "after": {
+    "length_um": 1205.8184319707398,
+    "min_curvature_radius_um": 28.07281743409434,
+    "min_nonlocal_distance_um": 56.64056132873031
+  },
+  "displacement": {
+    "max_displacement_um": 6.308354159803411,
+    "mean_displacement_um": 0.5813977924759083,
+    "fraction_moved_over_2um": 0.06290849673202614
+  },
+  "length_change_percent": -1.288616375400209
+}
