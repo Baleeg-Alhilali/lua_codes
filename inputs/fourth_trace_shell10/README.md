@@ -46,7 +46,7 @@ with refinement; the cap pyramids drop r0 -> r1 (0.27 -> 0.024) and then hold.
 ## `fourth_shell10_a15.ugx`: anisotropy 1.5 (recommended, 2026-11-26)
 
 Same trace and shell; only `-anisotropy 1.5` instead of 2. 174 axial stations,
-67,925 coarse volumes, r1 553,040, r2 4,449,232 (smaller than anisotropy 2).
+68,611 coarse volumes, r1 553,040, r2 4,449,232 (smaller than anisotropy 2).
 Generator validation PASS r0-r2; checker mode 2, 0 inverted/zero volumes:
 
 | min corner scaled J | r0 | r1 | r2 |
