@@ -70,4 +70,28 @@ diverge (46 -> 104 -> 196). The transport block itself is not the limit
   Krylov, or a deeper coarse hierarchy), without a direct solver.
 - Small FV1 undershoots in Inter at coarse levels in diffusion-only tests
   (-6.6e-5 r0, -3.1e-7 r1, none r2); none in the coupled runs.
-- Pump, solvent drag and transient flow are not included yet.
+- Solvent drag and transient flow are not included yet (pump: see below).
+
+## Na/K pump stage (2026-11-26, r0 and r1, 8 ranks)
+
+Transporters: Na apical leak (1e-3 mm/s, project) + basolateral NaKPump only;
+K basolateral leak (7.4e-4 mm/s) + pump, no apical leak; Cl and urea leak
+across both membranes. NaKPump (neuro_collection): 3 Na out : 2 K in,
+Jmax = 0.036 mM mm/s, K_Na = 3.516 mM, K_K = 0.8584 mM (2026-11-22 note).
+Nonlinear transport block: chord/Newton defect correction with the reused
+Jacobian; rebuild only if a step needs more than 2 corrections (never
+triggered up to 1 s).
+
+| | r0 | r1 |
+|---|---|---|
+| corrections per step (linear its) | 2 (1 + 1) | 2 (6 + 4) |
+| transport defect per step | ~4e-5 -> ~2e-8 -> ~5e-11 | ~1.5e-5 -> ~1.2e-8 -> ~3e-11 |
+| transport time per step | 0.9-1.0 s | 3.7-3.8 s |
+| max mass-balance error | 6.4e-9 % | 3.1e-8 % |
+| positivity | ok | ok |
+
+r1 at t = 1 s vs the leak-only run: membrane Na 20.3-21.5 mM (leak only
+27.0-27.7), membrane K 129.5-130.2 mM (124.7-125.3), Inter Na up to
+141.2 mM next to Basolateral (pumped out), Lumen K max 5.39 mM (7.39; no
+apical K leak). Still not physiological: no solvent drag, no apical Na
+entry pathways other than the leak, no Cl transporters.
