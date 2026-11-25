@@ -1,0 +1,33 @@
+{
+  "input": "/Users/alhilaba/Documents/Promesh_swc/Model/runs/fourth_shell10_2026-11-26/f4s10_p1_outerwall_extended.swc",
+  "output": "/Users/alhilaba/Documents/Promesh_swc/Model/runs/fourth_shell10_2026-11-26/f4s10_ext.swc",
+  "method": "inextensible rod (repair_trace_rod.py)",
+  "joint_with": [],
+  "targets": {
+    "clearance_um": 75.0,
+    "min_curvature_radius_um": 55.0,
+    "exclusion_arclength_um": 80.0
+  },
+  "before": {
+    "length_um": 1437.357998507446,
+    "min_curvature_radius_um": 11.406311842533363,
+    "min_nonlocal_distance_um": 74.22664498978575
+  },
+  "after": {
+    "length_um": 1437.052865011982,
+    "min_curvature_radius_um": 56.449789718654664,
+    "min_nonlocal_distance_um": 77.10488561950285
+  },
+  "displacement": {
+    "max_displacement_um": 4.008219008977166,
+    "mean_displacement_um": 0.9189556878030023,
+    "fraction_moved_over_2um": 0.034722222222222224
+  },
+  "length_retained_vs_raw": 0.9986833461322229,
+  "raw_length_um": 1438.9474607517088,
+  "denoised_length_um": 1437.306106797608,
+  "target_length_um": 1437.306106797608,
+  "segments": 575,
+  "segment_length_um": 2.4996627944306224,
+  "seconds": 101.94174909591675
+}

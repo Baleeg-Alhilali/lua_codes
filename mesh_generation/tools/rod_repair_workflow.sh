@@ -7,6 +7,9 @@
 #        CHECK=1 to run check_refinement_quality.lua (mode 2) to NUMREFS.
 # Mesh settings: 10 um lumen + 10 um membrane, ogrid 12, BoxRefs 3, hex Inter,
 # 3 um structured shell (the true-scale configuration of 2026-11-23/24).
+#        INTER_OPTS replaces the shell options, e.g. a 10 um shell of two 5 um
+#        hex layers: "-prismInterThickness 10 -interMinLayers 2 -interMaxLayers 2"
+#        (needs about --min-curvature-radius 55 --clearance 75, 2026-11-26).
 set -u
 RAW=$1; OUT=$2; P=$3; shift 3
 UG4=${UG4:-/Users/alhilaba/UG4_promesh_ogrid}
@@ -15,7 +18,7 @@ NUMREFS=${NUMREFS:-2}
 HERE=$(cd "$(dirname "$0")" && pwd)
 MG=$(cd "$HERE/.." && pwd)
 mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
-MESH="-radius 10 -membraneThickness 10 -ogrid 12 -BoxRefs 3 -interMesh hex -prismInterThickness 3"
+MESH="-radius 10 -membraneThickness 10 -ogrid 12 -BoxRefs 3 -interMesh hex ${INTER_OPTS:--prismInterThickness 3}"
 
 python3 "$HERE/repair_trace_rod.py" "$RAW" -o "$OUT/${P}_coil.swc" \
     --report "$OUT/${P}_coil.json" "$@" > "$OUT/${P}_coil.log" 2>&1 \

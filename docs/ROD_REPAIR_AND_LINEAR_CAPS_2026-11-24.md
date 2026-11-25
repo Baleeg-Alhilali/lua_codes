@@ -261,3 +261,15 @@ below J 0.05 (minimum 1e-6 to 2e-3) versus 23-34 with hex. The prism path has
 no outward caps (2,520 triangular transition faces) and none of the hex
 path's bend/portal thickness limits. Prisms do not fix the thin-cell problem;
 the 2-layer hex meshes in `inputs/fourth_trace_thick_hex/` remain the option.
+
+## 8. Fourth trace with a 10 um, two-layer hex shell (2026-11-26)
+
+A shell as thick as the membrane (10 um, 2 x 5 um hexes) needs bend radius
+>= ~50 um (the builder caps the shell at 0.6 R - 20 um) and centreline
+clearance >= ~70 um. The fourth trace was re-repaired at R 55 / clearance 75
+(default homotopy reached R 51 only; `--ramp-steps 24 --lbfgs-iters 1000
+--w-length 1e5` passed). Built with anisotropy 2 so that Inter/Membrane hex
+aspect ratios stay below 10 (max 8.2 at r2). Validation PASS r0-r2, 0 inverted.
+Details and tables: `inputs/fourth_trace_shell10/README.md`.
+`rod_repair_workflow.sh` now takes `INTER_OPTS`; new tool
+`mesh_generation/tools/hex_aspect_ratio.py`. Geometry pass only.
