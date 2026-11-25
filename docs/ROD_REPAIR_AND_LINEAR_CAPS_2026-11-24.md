@@ -238,3 +238,16 @@ before deeper refinement. Mesh: `inputs/third_fourth_joint_pad100/`.
 Not done: generator r2 flat files for the joint mesh (r2 checked in memory),
 flow/transport solves, and the 32 vs 35 um choice for the single-trace meshes
 (the third-trace meshes used 32 um and passed).
+
+## 7. Thicker Inter hex cells on the full fourth trace (2026-11-25)
+
+The hex cell radial thickness is `-prismInterThickness / layers`, where the
+layer count is clamp(ceil(`-interLayersPerSurfaceEdge` x thickness / surface
+edge), `-interMinLayers`, `-interMaxLayers`); with the 3 um shell the minimum
+of 4 layers gave 0.75 um cells. Lua and C++ both require >= 2 layers.
+Scan (2 layers, same trace as `inputs/fourth_trace_full_pad100`): 3 and 4 um
+pass r0-r2 with 0 inverted cells; 4.5 um inverts 2 cap pyramids at r2; 5-7 um
+segfault in TetGen. Meshes, commands and quality table:
+`inputs/fourth_trace_thick_hex/README.md`. The 2 x 2 um mesh is the thickest
+valid one but its pyramid minimum drops 0.081 -> 0.020 r1 -> r2; the 2 x 1.5 um
+mesh is stable. Geometry pass only; no solves.
