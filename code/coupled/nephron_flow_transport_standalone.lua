@@ -99,21 +99,22 @@ massBalanceTolerancePercent = 1.0e-6      -- per-step discrete balance gate
 
 -- Solutes.  Free-solution diffusion in all compartments (as the validated
 -- urea model).  Leak permeabilities [mm/s] act on the smooth face area, so no
--- radius factor is applied.  TEST STAGE: every solute leaks across both
--- membranes.  Published (Weinstein) values are kept where nonzero; zeros of
--- the paper (Na apical, Cl apical, Cl basolateral: transporter pathways there)
--- are replaced by the 2026-11-22 project assumptions, marked "project".
+-- radius factor is applied; a zero permeability means no leak.  TEST STAGE
+-- (2026-11-26): Na leaks only apically and leaves the cell by the
+-- basolateral Na/K pump; K leaks only basolaterally (plus the pump); Cl and
+-- urea leak across both membranes.  Weinstein values where nonzero; the
+-- 2026-11-22 project assumptions are marked "project".
 soluteParameters = {
     na = {
         label = "Na", diffusion = 1.33e-3, inlet = 140.0,
         cellInitial = 19.6, interInitial = 140.3,
         apicalPermeability = 1.00e-3,       -- project
-        basolateralPermeability = 1.40e-6,
+        basolateralPermeability = 0.0,      -- pump pathway only
     },
     k = {
         label = "K", diffusion = 1.96e-3, inlet = 4.9,
         cellInitial = 138.1, interInitial = 4.66,
-        apicalPermeability = 9.00e-5,
+        apicalPermeability = 0.0,           -- no apical K leak
         basolateralPermeability = 7.40e-4,
     },
     cl = {
@@ -130,6 +131,14 @@ soluteParameters = {
     },
 }
 soluteOrder = {"na", "k", "cl", "urea"}
+
+-- Basolateral Na/K-ATPase (neuro_collection NaKPump), 3 Na out : 2 K in,
+-- J_cycle = Jmax [Na_i/(Na_i+K_Na)]^3 [K_o/(K_o+K_K)]^2 (2026-11-22 note:
+-- 10.8 nmol/(s cm^2) Na = 0.108 mM mm/s, i.e. Jmax = 0.036 mM mm/s).
+pumpEnabled = true
+pumpMaxCycleFlux = 0.036                  -- [mM mm/s]
+pumpKNa = 3.516                           -- [mM]
+pumpKK = 0.8584                           -- [mM]
 compartmentOrder = {"lumen", "membrane", "inter"}
 
 assert(endTime > 0.0, "-endTime must be positive")
@@ -605,19 +614,23 @@ for _, soluteKey in ipairs(soluteOrder) do
         eqs[compartment] = eq
     end
 
-    local apicalLeak = Leak({fields.lumen, fields.membrane})
-    apicalLeak:set_permeability(p.apicalPermeability)
-    local apical = MembraneTransportFV1("Apical", apicalLeak)
-    apical:set_density_function(1.0)
-    transportDisc:add(apical)
-    eqs.membraneDiscs = {apical}
-
-    local basolateralLeak = Leak({fields.membrane, fields.inter})
-    basolateralLeak:set_permeability(p.basolateralPermeability)
-    local basolateral = MembraneTransportFV1("Basolateral", basolateralLeak)
-    basolateral:set_density_function(1.0)
-    transportDisc:add(basolateral)
-    eqs.membraneDiscs[#eqs.membraneDiscs + 1] = basolateral
+    eqs.membraneDiscs = {}
+    if p.apicalPermeability > 0.0 then
+        local apicalLeak = Leak({fields.lumen, fields.membrane})
+        apicalLeak:set_permeability(p.apicalPermeability)
+        local apical = MembraneTransportFV1("Apical", apicalLeak)
+        apical:set_density_function(1.0)
+        transportDisc:add(apical)
+        eqs.membraneDiscs[#eqs.membraneDiscs + 1] = apical
+    end
+    if p.basolateralPermeability > 0.0 then
+        local basolateralLeak = Leak({fields.membrane, fields.inter})
+        basolateralLeak:set_permeability(p.basolateralPermeability)
+        local basolateral = MembraneTransportFV1("Basolateral", basolateralLeak)
+        basolateral:set_density_function(1.0)
+        transportDisc:add(basolateral)
+        eqs.membraneDiscs[#eqs.membraneDiscs + 1] = basolateral
+    end
 
     eqs.neumannDiscs = {
         MakeInletInflow(fields.lumen, p.inlet),
@@ -626,6 +639,19 @@ for _, soluteKey in ipairs(soluteOrder) do
     for _, neumann in ipairs(eqs.neumannDiscs) do transportDisc:add(neumann) end
     transportEquations[soluteKey] = eqs
 end
+pumpDiscs = {}
+if pumpEnabled then
+    naKPump = NaKPump({transportFields.na.membrane, transportFields.na.inter,
+                       transportFields.k.membrane, transportFields.k.inter})
+    naKPump:set_max_flux(pumpMaxCycleFlux)
+    naKPump:set_k_na(pumpKNa)
+    naKPump:set_k_k(pumpKK)
+    local pump = MembraneTransportFV1("Basolateral", naKPump)
+    pump:set_density_function(1.0)
+    transportDisc:add(pump)
+    pumpDiscs[1] = pump
+end
+
 -- Inlet: inlet concentration.  OuterWall: fixed bath (Inter initial
 -- value).  The Darcy pressure is Dirichlet on OuterWall, so the water leaving
 -- there is the internal FV1 face flux into those boxes; a fixed bath
@@ -712,6 +738,7 @@ for _, soluteKey in ipairs(soluteOrder) do
                                       outletValue:value(), "Outlet", "Lumen"))
 end
 -- the stationary residual uses the transport element discs themselves
+for _, pump in ipairs(pumpDiscs) do stationaryDisc:add(pump) end
 for _, soluteKey in ipairs(soluteOrder) do
     local eqs = transportEquations[soluteKey]
     for _, compartment in ipairs(compartmentOrder) do
@@ -841,7 +868,12 @@ transportLinearSolver = util.solver.CreateSolver({
                  reduction = 1.0e-10, verbose = false},
 })
 transportDefectAbsolute = 1.0e-10
-transportMaxCorrections = 3
+-- The Na/K pump makes the transport block nonlinear.  Each step iterates
+-- u <- u - J^{-1} d(u) with the exact defect and a reused Jacobian
+-- (chord/Newton); J and the GMG are rebuilt at the current state when the
+-- previous step needed more than jacobianRebuildCorrections corrections.
+transportMaxCorrections = 10
+jacobianRebuildCorrections = 2
 
 -- Flow block per step: solved when its defect exceeds flowStepTolerance
 -- (relative 1e-8 of the steady-flow initial defect, as the steady solve).
@@ -1009,6 +1041,11 @@ for step = 1, numSteps do
 
     -- (2) Transport block (flow DoFs held at the new flow).
     local transportStepStart = GetClockS()
+    if (previousCorrections or 0) > jacobianRebuildCorrections then
+        SetupTransportSolver()
+        log[#log + 1] = "[J rebuilt]"
+    end
+    local corrections = 0
     for correction = 0, transportMaxCorrections do
         timeDisc:assemble_defect(transportDefect, transportSolution, gridLevel)
         local norm = VecNorm(transportDefect)
@@ -1025,7 +1062,9 @@ for step = 1, numSteps do
         log[#log + 1] = string.format("(lin %d)", transportLinearSolver:step())
         VecScaleAdd2(transportSolution, 1.0, transportSolution,
                      -1.0, transportCorrection)
+        corrections = corrections + 1
     end
+    previousCorrections = corrections
     time = solTimeSeries:time(0) + dt  -- same rounding as prepare_step
     print(string.format("STEP %d t=%.6g | %s, %.2f s | transport defect %s, %.2f s | %s",
                         step, time, flowLog, flowTime, table.concat(log, " "),
