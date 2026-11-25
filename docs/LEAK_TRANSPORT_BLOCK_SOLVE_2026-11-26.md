@@ -95,3 +95,15 @@ r1 at t = 1 s vs the leak-only run: membrane Na 20.3-21.5 mM (leak only
 141.2 mM next to Basolateral (pumped out), Lumen K max 5.39 mM (7.39; no
 apical K leak). Still not physiological: no solvent drag, no apical Na
 entry pathways other than the leak, no Cl transporters.
+
+### 30 s run (r1, 8 ranks, dt 0.1, commit a2fa7d2)
+
+Output: `Model/Results/2026-11-26_pump_r1_30s/` (pump_r1_{lumen,membrane,inter},
+every 1 s, PVD + PVTU, 1.0 GB, log `run_np8_r1.log`). All 300 steps
+converged with 2 corrections (linear its 5-6 + 3-4), no Jacobian rebuild,
+mean 3.3 s per step, total 1165 s; max mass-balance error 8.3e-8 %;
+positivity ok. Membrane at t = 10 / 20 / 30 s: Na 23.5-26.7 / 25.1-28.5 /
+26.1-29.4 mM, K 83.9-85.5 / 64.2-66.0 / 56.9-58.7 mM, Cl 92-94 / 108-111 /
+111-115 mM. K keeps draining through the basolateral leak faster than the
+pump returns it: without a membrane potential (no electrodiffusion) the cell
+cannot hold K, so this is a transport/solver test, not a physiological state.
