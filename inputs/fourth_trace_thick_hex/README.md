@@ -33,3 +33,7 @@ segfault in TetGen (5 um reproducibly; also with UG_TETGEN_DOUBLE_PRECISION=1).
 Closest coil passes are 56.6 um apart centre to centre (16.6 um between
 Membrane surfaces), so shells cannot exceed ~8 um regardless.
 Runs: `runs/fourth_thick_hex_2026-11-25/` (not in git).
+
+A prism shell (`-interMesh prism`) was also tried at 3-8 um: all fail at r1/r2
+(inverted refined prisms) with far worse coarse tetrahedra; see section 7 of
+`docs/ROD_REPAIR_AND_LINEAR_CAPS_2026-11-24.md`.

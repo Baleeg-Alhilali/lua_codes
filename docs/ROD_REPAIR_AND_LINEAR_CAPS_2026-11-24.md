@@ -251,3 +251,13 @@ segfault in TetGen. Meshes, commands and quality table:
 `inputs/fourth_trace_thick_hex/README.md`. The 2 x 2 um mesh is the thickest
 valid one but its pyramid minimum drops 0.081 -> 0.020 r1 -> r2; the 2 x 1.5 um
 mesh is stable. Geometry pass only; no solves.
+
+Prism shell instead (`-interMesh prism -interRadialGrowth 0`, 2 layers, same
+trace), 2026-11-25: coarse generation passes at 3, 4, 5, 6 and 8 um, but every
+variant fails refinement with "Could not repair a negatively ordered refined
+prism" (3, 4, 6 um at r1; 8 um at r2, after r1 prism J 0.061). The coarse
+TetGen far field is also much worse than with hex: 1,715-3,825 tetrahedra
+below J 0.05 (minimum 1e-6 to 2e-3) versus 23-34 with hex. The prism path has
+no outward caps (2,520 triangular transition faces) and none of the hex
+path's bend/portal thickness limits. Prisms do not fix the thin-cell problem;
+the 2-layer hex meshes in `inputs/fourth_trace_thick_hex/` remain the option.
