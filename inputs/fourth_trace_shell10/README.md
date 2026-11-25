@@ -1,6 +1,8 @@
 # Full fourth trace, 10 um hex Inter shell of two 5 um layers (2026-11-26)
 
-Load `fourth_shell10.ugx` (coarse, projector-backed) and refine in memory.
+**Use `fourth_shell10_a15.ugx`** (anisotropy 1.5, better caps; see the last
+section). `fourth_shell10.ugx` (anisotropy 2) is kept for reference.
+Load the coarse projector-backed UGX and refine in memory.
 Subset names identical to `inputs/fourth_trace_full_pad100/`. Geometry pass
 r0-r2 only; no flow or transport solve yet.
 
@@ -40,3 +42,27 @@ Hex edge aspect ratio (longest / shortest, `mesh_generation/tools/hex_aspect_rat
 
 Limits: lumen-core hexes next to the 2.6 um inner ring exceed 10 and grow
 with refinement; the cap pyramids drop r0 -> r1 (0.27 -> 0.024) and then hold.
+
+## `fourth_shell10_a15.ugx`: anisotropy 1.5 (recommended, 2026-11-26)
+
+Same trace and shell; only `-anisotropy 1.5` instead of 2. 174 axial stations,
+67,925 coarse volumes, r1 553,040, r2 4,449,232 (smaller than anisotropy 2).
+Generator validation PASS r0-r2; checker mode 2, 0 inverted/zero volumes:
+
+| min corner scaled J | r0 | r1 | r2 |
+|---|---|---|---|
+| tet | 0.0271 | 0.0221 | 0.0221 |
+| hex | 0.962 | 0.989 | 0.997 |
+| prism | 0.499 | 0.470 | 0.471 |
+| pyramid | 0.326 | 0.109 | 0.101 |
+
+Hex edge aspect ratio max r0 / r1 / r2: Inter 4.23 / 5.14 / 7.14, Membrane
+4.15 / 5.14 / 7.14, Lumen 8.01 / 9.85 / 13.65 (96 of 132,864 lumen-core hexes
+above 10 at r2; none in Inter or Membrane).
+
+Cap/TetGen test (same trace, coarse variants checked r0-r2): smaller TetGen
+cells near the shell (`-interNearEdgeFactor 1 -interNearDistanceFactor 3`)
+gave 5-6x more volumes and ~9x more coarse tets below J 0.05 without
+improving the caps; `-interQuality 1.4` changed nothing. Anisotropy 1.5 alone
+raised the pyramid minimum 0.022 -> 0.101 and the tet minimum
+0.0054 -> 0.0221 at r2. Runs: `runs/fourth_shell10_caps_2026-11-26/`.

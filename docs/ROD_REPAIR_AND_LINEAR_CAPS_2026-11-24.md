@@ -273,3 +273,8 @@ aspect ratios stay below 10 (max 8.2 at r2). Validation PASS r0-r2, 0 inverted.
 Details and tables: `inputs/fourth_trace_shell10/README.md`.
 `rod_repair_workflow.sh` now takes `INTER_OPTS`; new tool
 `mesh_generation/tools/hex_aspect_ratio.py`. Geometry pass only.
+Cap treatment follow-up: anisotropy 1.5 (squarer outer cap bases, 174
+stations) raised the r2 pyramid minimum 0.022 -> 0.101 and the tet minimum
+0.0054 -> 0.0221 with fewer volumes; finer TetGen near-field sizing made the
+mesh 5-6x larger and the tets worse, and `-interQuality 1.4` had no effect.
+Recommended mesh: `inputs/fourth_trace_shell10/fourth_shell10_a15.ugx`.
