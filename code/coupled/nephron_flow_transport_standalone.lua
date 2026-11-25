@@ -1,17 +1,42 @@
 ----------------------------------------------------------
 --
---  Standalone quasi-steady nephron flow and multispecies transport
+--  Standalone quasi-steady nephron flow and multispecies leak transport
 --
---  Lumen:       Stokes FV1
---  Membrane:    Darcy FE
---  Interstitium: Darcy FE
---  Interface:   pressure trace, normal traction and BJS slip
+--  Flow (solved once, steady):
+--    Lumen:        Stokes FV1
+--    Membrane:     Darcy FE (or FV1, see darcyScheme)
+--    Interstitium: Darcy FE (or FV1)
+--    Interface:    pressure trace, Darcy traction, BJS friction;
+--                  NoNormalStressOutflow on Outlet only (2026-11-24 fix)
 --
---  Transport: transient Na+, K+, Cl- and urea advection--diffusion
---  Apical/Basolateral: published passive leak pathways only
---  No Na/K pump and no solvent-drag flux in this model stage.
+--  Transport (transient, backward Euler):
+--    Na+, K+, Cl-, urea advection--diffusion in Lumen, Membrane, Inter
+--    Apical and Basolateral: passive leaks only (no pump, no solvent drag)
+--
+--  Coupling: flow and concentrations share one approximation space so that
+--  transport convects with the same FV1 face fluxes the flow conserved
+--  (Stokes velocity_ip, Darcy pressure gradient).  Block solve per time step
+--  (block Gauss-Seidel; exact for the one-way coupling): (1) the
+--  Stokes--Darcy block with its own GMG, concentrations held; (2) the
+--  transport block with its own GMG, flow DoFs held at the new flow.
+--
+--  This is a software/transport test stage, not a physiological model.
+--  See docs/LEAK_TRANSPORT_BLOCK_SOLVE_2026-11-26.md.
+--
+--  Run from any directory, e.g. (8 ranks):
+--    mpirun -np 8 <UG4>/bin/ugshell -ex code/coupled/nephron_flow_transport_standalone.lua \
+--        -numRefs 0 -endTime 20 -dt 0.1 -outputEverySteps 10 -output <prefix>
 --
 ----------------------------------------------------------
+
+-- Resolve the Model root from this script's location.
+local __script = debug.getinfo(1, "S").source
+if __script:sub(1, 1) == "@" then __script = __script:sub(2) end
+if __script:sub(1, 1) ~= "/" then
+    __script = CurrentWorkingDirectory() .. "/" .. __script
+end
+MODEL_ROOT = assert(__script:match("^(.*)/code/coupled/[^/]+$"),
+    "Expected this script inside Model/code/coupled: " .. __script)
 
 ug_load_script("ug_util.lua")
 ug_load_script("util/load_balancing_util.lua")
@@ -22,95 +47,67 @@ ug_load_script("util/load_balancing_util.lua")
 
 dim = 3
 
-numRefs = util.GetParamNumber("-numRefs", 2, "number of refinements")
-gridName = "/Users/alhilaba/Documents/Promesh_swc/Model/runs/third_trace_third_hex_sim_ready.ugx"
--- Previous mesh: gridName = "runs/third_trace_restored_t3.ugx"
+numRefs = util.GetParamNumber("-numRefs", 0, "number of refinements")
+gridName = util.GetParam("-grid", MODEL_ROOT ..
+    "/runs/fourth_trace_best_mesh/fourth_trace_best_mesh.ugx",
+    "coarse projector-backed UGX (generated meshes live in Model/runs)")
 outputName = util.GetParam(
-    "-output", "Results_final/nephron_flow_transport_r" .. numRefs,
-    "VTK output prefix"
-)
+    "-output", MODEL_ROOT .. "/Results_final/leak_transport_r" .. numRefs,
+    "VTK output prefix")
 
-local function EnsureOutputDirectory(prefix)
-    local directory = string.match(prefix, "^(.*)/[^/]*$")
-    if directory == nil or directory == "" then return end
-
-    local current = string.sub(directory, 1, 1) == "/" and "/" or ""
-    for part in string.gmatch(directory, "[^/]+") do
-        if current == "/" then
-            current = current .. part
-        elseif current == "" then
-            current = part
-        else
-            current = current .. "/" .. part
-        end
-        if not DirectoryExists(current) then
-            assert(CreateDirectory(current) or DirectoryExists(current),
-                   "Could not create output directory: " .. current)
-        end
-    end
-end
+-- Transient transport run control
+endTime = util.GetParamNumber("-endTime", 20.0)
+dt = util.GetParamNumber("-dt", 0.1)
+outputEverySteps = util.GetParamNumber("-outputEverySteps", 10)
 
 -- Internal unit system: millimetres and seconds.
--- Velocity: mm/s; kinematic pressure: mm^2/s^2; permeability: mm^2.
+-- Velocity: mm/s; kinematic pressure: mm^2/s^2; permeability: mm^2;
+-- concentration: mM; membrane permeability: mm/s.
 
--- Inlet geometry and flow rate.  The paper supplies Q, while the 3-D Stokes
--- boundary needs velocity.  For a circular Poiseuille profile,
--- u_mean = Q/(pi R^2) and u_max = 2*u_mean.
-inletCenterX = 7.74237
-inletCenterY = 11.3605
-inletCenterZ = 5.538
-inletDirectionX = 0.0
+-- Inlet (fourth_trace_best_mesh.ugx: 10 um hex Inter shell, x-min wall).  Poiseuille profile with
+-- u_mean = Q/(pi R^2), u_max = 2 u_mean.
+inletCenterX = 0.338568
+inletCenterY = 0.400919
+inletCenterZ = 0.163024
+inletDirectionX = 1.0
 inletDirectionY = 0.0
-inletDirectionZ = 1.0
+inletDirectionZ = 0.0
 inletRadius = 1.0e-2
 inletFlowRate = 5.0e-4                    -- [mm^3/s] = 30 nL/min
-meanInletVelocity = inletFlowRate /
-    (math.pi * inletRadius * inletRadius)
+meanInletVelocity = inletFlowRate / (math.pi * inletRadius * inletRadius)
 maximumInletVelocity = 2.0 * meanInletVelocity
 
--- Previous third_trace_restored_t3.ugx inlet:
--- center = (7.82522082, 11.24569434, 5.583) mm
--- direction = (0.0, 0.0, 1.0), radius = 1.5e-2 mm
-
--- Fluid and porous-medium parameters
+-- Fluid and porous-medium parameters (docs/FOURTH_TRACE_FULL_FLOW_2026-11-24.md)
 kinematicViscosity = 1.0                  -- [mm^2/s]
-membranePermeability = util.GetParamNumber(
-    "-membranePermeability", 1.0e-13)     -- [mm^2]
-interPermeability = util.GetParamNumber(
-    "-interPermeability", 1.0e-11)        -- [mm^2]
-bjsPermeability = util.GetParamNumber(
-    "-bjsPermeability", 1.0e-13)          -- [mm^2]
-bjsAlpha = 0.2                             -- dimensionless
-normalImpedance = 1.0e3                    -- [mm/s]
-pressureScale = 1.0e4                      -- dimensionless
-outerKinematicPressure = 6.132812e5        -- [mm^2/s^2]
-outletKinematicPressure = 2.6664474e6      -- [mm^2/s^2]
+membranePermeability = 7.0e-12            -- [mm^2] (~8.8% reabsorption)
+interPermeability = 1.0e-11               -- [mm^2]
+bjsPermeability = 1.0e-13                 -- [mm^2]
+bjsAlpha = 0.2
+normalImpedance = 1.0e3                   -- [mm/s]
+pressureScale = 1.0e4
+outerKinematicPressure = 6.132812e5       -- [mm^2/s^2] OuterWall
+outletKinematicPressure = 2.6664474e6     -- [mm^2/s^2] Outlet
+
+-- Darcy discretization: "FE" (validated BiCGStab + Uzawa/line-GS GMG flow
+-- solver) or "FV1" (box-conservative, GMRES(100) + Uzawa/ILU GMG).
+darcyScheme = "FE"
 
 -- Parallel distribution and validation
 firstDistributionLevel = 0
 interfaceConservationTolerancePercent = 1.0e-1
+massBalanceTolerancePercent = 1.0e-6      -- per-step discrete balance gate
 
--- Transient transport run control
-endTime = util.GetParamNumber("-endTime", 100.0)
-dt = util.GetParamNumber("-dt", 1.0)
-outputEverySteps = util.GetParamNumber("-outputEverySteps", 1)
-
--- Concentrations [mM] and free-solution diffusion [mm^2/s]. The validated
--- urea formulation uses the same aqueous diffusion coefficient in all three
--- resolved volumes; this leak-only extension follows that formulation rather
--- than introducing an unsupported 1000-fold intracellular hindrance factor.
---
--- Weinstein's h_i,alpha*A coefficients are already normalized by smooth
--- epithelial reference area. The 3-D MembraneTransportFV1 operator integrates
--- flux density over the actual smooth face area, so no radius or 2*pi*r factor
--- is applied here. Apical uses MI. Basolateral combines the parallel IE and IS
--- cell-to-interspace pathways. Zero paper coefficients remain zero; whole-
--- epithelium effective permeabilities are not duplicated on both faces.
+-- Solutes.  Free-solution diffusion in all compartments (as the validated
+-- urea model).  Leak permeabilities [mm/s] act on the smooth face area, so no
+-- radius factor is applied.  TEST STAGE: every solute leaks across both
+-- membranes.  Published (Weinstein) values are kept where nonzero; zeros of
+-- the paper (Na apical, Cl apical, Cl basolateral: transporter pathways there)
+-- are replaced by the 2026-11-22 project assumptions, marked "project".
 soluteParameters = {
     na = {
         label = "Na", diffusion = 1.33e-3, inlet = 140.0,
         cellInitial = 19.6, interInitial = 140.3,
-        apicalPermeability = 0.0,
+        apicalPermeability = 1.00e-3,       -- project
         basolateralPermeability = 1.40e-6,
     },
     k = {
@@ -122,8 +119,8 @@ soluteParameters = {
     cl = {
         label = "Cl", diffusion = 2.03e-3, inlet = 113.2,
         cellInitial = 16.3, interInitial = 112.0,
-        apicalPermeability = 0.0,
-        basolateralPermeability = 0.0,
+        apicalPermeability = 8.00e-4,       -- project
+        basolateralPermeability = 8.00e-4,  -- project
     },
     urea = {
         label = "Urea", diffusion = 1.67e-3, inlet = 5.0,
@@ -135,8 +132,6 @@ soluteParameters = {
 soluteOrder = {"na", "k", "cl", "urea"}
 compartmentOrder = {"lumen", "membrane", "inter"}
 
-membraneTransportDensity = 1.0
-
 assert(endTime > 0.0, "-endTime must be positive")
 assert(dt > 0.0 and dt <= endTime, "-dt must be in (0, endTime]")
 assert(outputEverySteps >= 1 and
@@ -147,33 +142,44 @@ assert(outputEverySteps >= 1 and
 -- Initialization
 --------------------------------------------------------------------------------
 
-totalStartTime = GetClockS()
+local function EnsureOutputDirectory(prefix)
+    local directory = string.match(prefix, "^(.*)/[^/]*$")
+    if directory == nil or directory == "" then return end
+    local current = string.sub(directory, 1, 1) == "/" and "/" or ""
+    for part in string.gmatch(directory, "[^/]+") do
+        if current == "/" or current == "" then
+            current = current .. part
+        else
+            current = current .. "/" .. part
+        end
+        if not DirectoryExists(current) then
+            assert(CreateDirectory(current) or DirectoryExists(current),
+                   "Could not create output directory: " .. current)
+        end
+    end
+end
 
+totalStartTime = GetClockS()
 InitUG(dim, AlgebraType("CPU", 1))
 
 if ProcRank() == 0 then EnsureOutputDirectory(outputName) end
 SynchronizeProcesses()
 
-print("Standalone quasi-steady nephron flow and multispecies transport")
+print("Standalone quasi-steady nephron flow (" .. darcyScheme .. " Darcy) and leak transport")
 print("Grid: " .. gridName)
 print("Refinements: " .. numRefs)
 print("MPI processes: " .. NumProcs())
 print(string.format(
-    "Inlet: Q=%.6e mm^3/s (%.6g nL/min), R=%.6e mm, " ..
-    "u_mean=%.6e mm/s, u_max=%.6e mm/s",
-    inletFlowRate, inletFlowRate * 6.0e4, inletRadius,
-    meanInletVelocity, maximumInletVelocity
-))
-print(string.format("Transport interval: 0 to %.6g s, dt=%.6g s",
-                    endTime, dt))
+    "Inlet: Q=%.6e mm^3/s, R=%.6e mm, u_mean=%.6e mm/s",
+    inletFlowRate, inletRadius, meanInletVelocity))
+print(string.format("Transport: 0 to %.6g s, dt=%.6g s, output every %d steps",
+                    endTime, dt, outputEverySteps))
 for _, soluteKey in ipairs(soluteOrder) do
     local p = soluteParameters[soluteKey]
     print(string.format(
-        "%s: inlet=%.6g cell0=%.6g inter0=%.6g mM; " ..
-        "D=%.6g mm^2/s; " ..
+        "%s: inlet=%.6g cell0=%.6g inter0=%.6g mM; D=%.6g mm^2/s; " ..
         "Papical=%.6g Pbaso=%.6g mm/s",
-        p.label, p.inlet, p.cellInitial, p.interInitial,
-        p.diffusion,
+        p.label, p.inlet, p.cellInitial, p.interInitial, p.diffusion,
         p.apicalPermeability, p.basolateralPermeability))
 end
 
@@ -187,99 +193,68 @@ LoadDomain(dom, gridName)
 
 balancer.firstDistLvl = firstDistributionLevel
 balancer.parametersParsed = true
-
 print("Refining and distributing...")
 balancer.RefineAndRebalanceDomain(dom, numRefs)
-
-print("Domain info:")
 print(dom:domain_info():to_string())
 
 allSubsets =
     "Lumen,Membrane,Inter,Apical,Basolateral,OuterWall," ..
     "MembraneWall,Inlet,Outlet,TripleJunction"
+velocitySubsets = "Lumen,Apical,Inlet,Outlet,TripleJunction"
+stokesPressureSubsets =
+    "Lumen,Membrane,Apical,Basolateral,MembraneWall,Inlet,Outlet,TripleJunction"
 
-velocitySubsets = {
-    "Lumen", "Apical", "Inlet", "Outlet", "TripleJunction"
-}
-
-stokesPressureSubsets = {
-    "Lumen", "Membrane", "Apical", "Basolateral", "MembraneWall",
-    "Inlet", "Outlet", "TripleJunction"
-}
-
-approxSpace = ApproximationSpace(dom)
-approxSpace:add_fct(
-    {"u", "v", "w"}, "Lagrange", 1, velocitySubsets
-)
-approxSpace:add_fct(
-    {"p_stokes"}, "Lagrange", 1, stokesPressureSubsets
-)
-approxSpace:add_fct(
-    "p_darcy_scaled", "Lagrange", 1, allSubsets
-)
 transportFieldSubsets = {
     lumen = "Lumen,Apical,Inlet,Outlet,TripleJunction",
     membrane = "Membrane,Apical,Basolateral,MembraneWall,TripleJunction",
     inter = "Inter,Basolateral,OuterWall",
 }
+compartmentVolume = {lumen = "Lumen", membrane = "Membrane", inter = "Inter"}
+
+approxSpace = ApproximationSpace(dom)
+approxSpace:add_fct("u,v,w", "Lagrange", 1, velocitySubsets)
+approxSpace:add_fct("p_stokes", "Lagrange", 1, stokesPressureSubsets)
+approxSpace:add_fct("p_darcy_scaled", "Lagrange", 1, allSubsets)
 transportFields = {}
 for _, soluteKey in ipairs(soluteOrder) do
     transportFields[soluteKey] = {}
     for _, compartment in ipairs(compartmentOrder) do
         local field = soluteKey .. "_" .. compartment
         transportFields[soluteKey][compartment] = field
-        approxSpace:add_fct(
-            field, "Lagrange", 1, transportFieldSubsets[compartment])
+        approxSpace:add_fct(field, "Lagrange", 1,
+                            transportFieldSubsets[compartment])
     end
 end
 approxSpace:init_levels()
 approxSpace:init_top_surface()
-
-print("Approximation space initialized")
+approxSpace:print_statistic()
 
 --------------------------------------------------------------------------------
--- Inlet profile
+-- Flow discretization
 --------------------------------------------------------------------------------
 
 function InletVelocity(x, y, z, t)
     local dx = x - inletCenterX
     local dy = y - inletCenterY
     local dz = z - inletCenterZ
-    local axial = dx * inletDirectionX
-        + dy * inletDirectionY + dz * inletDirectionZ
-    local radialX = dx - axial * inletDirectionX
-    local radialY = dy - axial * inletDirectionY
-    local radialZ = dz - axial * inletDirectionZ
-    local radiusSquared = radialX * radialX
-        + radialY * radialY + radialZ * radialZ
-    local profile = math.max(
-        0.0, 1.0 - radiusSquared / (inletRadius * inletRadius)
-    )
-
-    if radiusSquared >= inletRadius * inletRadius * (1.0 - 1.0e-6) then
-        profile = 0.0
-    end
-
+    local axial = dx * inletDirectionX + dy * inletDirectionY
+        + dz * inletDirectionZ
+    local rx = dx - axial * inletDirectionX
+    local ry = dy - axial * inletDirectionY
+    local rz = dz - axial * inletDirectionZ
+    local r2 = rx * rx + ry * ry + rz * rz
+    local profile = math.max(0.0, 1.0 - r2 / (inletRadius * inletRadius))
+    if r2 >= inletRadius * inletRadius * (1.0 - 1.0e-6) then profile = 0.0 end
     return maximumInletVelocity * profile * inletDirectionX,
         maximumInletVelocity * profile * inletDirectionY,
         maximumInletVelocity * profile * inletDirectionZ
 end
 
---------------------------------------------------------------------------------
--- Discretization
---------------------------------------------------------------------------------
-
-membraneMobility = membranePermeability / kinematicViscosity
-interMobility = interPermeability / kinematicViscosity
-scaledMembraneMobility = membraneMobility * pressureScale
-scaledInterMobility = interMobility * pressureScale
+scaledMembraneMobility = membranePermeability / kinematicViscosity * pressureScale
+scaledInterMobility = interPermeability / kinematicViscosity * pressureScale
 bjsFriction = bjsAlpha * kinematicViscosity / math.sqrt(bjsPermeability)
 
-outerPressureScaled = outerKinematicPressure / pressureScale
-
-stokesEq = NavierStokesFV1(
-    {"u", "v", "w", "p_stokes"}, {"Lumen"}
-)
+stokesEq = NavierStokesFV1({"u", "v", "w", "p_stokes"}, {"Lumen"})
 stokesEq:set_stokes(true)
 stokesEq:set_laplace(false)
 stokesEq:set_kinematic_viscosity(kinematicViscosity)
@@ -292,14 +267,9 @@ stokesEq:set_pac_upwind(false)
 stokesInlet = NavierStokesInflow(stokesEq)
 stokesInlet:add("InletVelocity", "Inlet")
 
+-- Outlet only: on Apical the continuity term of this condition was a mass
+-- sink after the pressure-trace merge (2026-11-24).
 stokesOpenBoundary = NavierStokesNoNormalStressOutflow(stokesEq)
--- Outlet only (2026-11-24): on Apical, the continuity term (u.n |face|) of
--- this condition was a mass sink after the PressureTraceConstraint merge,
--- because the lumen and membrane control volumes around an interface node
--- form one union CV whose Apical face is internal; the removed fluid never
--- entered the membrane (4.1% of Q at r2 with K_mem 7e-12 mm^2).  Its
--- tangential viscous flux also double-counted with the BJS friction.  Apical
--- keeps the Darcy traction (Neumann), BJS friction and normal impedance.
 stokesOpenBoundary:add("Outlet")
 
 stokesRim = NavierStokesWall(stokesEq)
@@ -311,37 +281,37 @@ stokesBJS:set_sliding_factor(bjsFriction)
 stokesBJS:set_sliding_limit(0.0)
 stokesBJS:set_normal_factor(normalImpedance)
 
-darcyMembraneEq = ConvectionDiffusionFE(
-    "p_darcy_scaled", "Membrane"
-)
+assert(darcyScheme == "FE" or darcyScheme == "FV1", "darcyScheme: FE or FV1")
+local DarcyEquation = darcyScheme == "FE" and ConvectionDiffusionFE
+                      or ConvectionDiffusionFV1
+darcyMembraneEq = DarcyEquation("p_darcy_scaled", "Membrane")
 darcyMembraneEq:set_mass_scale(0.0)
 darcyMembraneEq:set_diffusion(scaledMembraneMobility)
 
-darcyInterEq = ConvectionDiffusionFE(
-    "p_darcy_scaled", "Inter"
-)
+darcyInterEq = DarcyEquation("p_darcy_scaled", "Inter")
 darcyInterEq:set_mass_scale(0.0)
 darcyInterEq:set_diffusion(scaledInterMobility)
 
 darcyOuterPressure = DirichletBoundary()
-darcyOuterPressure:add(
-    outerPressureScaled, "p_darcy_scaled", "OuterWall"
-)
-
+darcyOuterPressure:add(outerKinematicPressure / pressureScale,
+                       "p_darcy_scaled", "OuterWall")
 inactiveDarcy = DirichletBoundary()
-inactiveDarcy:add(
-    0.0, "p_darcy_scaled", "Lumen,Inlet,Outlet"
-)
-
+inactiveDarcy:add(0.0, "p_darcy_scaled", "Lumen,Inlet,Outlet")
 inactiveStokes = DirichletBoundary()
-inactiveStokes:add(
-    0.0, "p_stokes", "Membrane,Basolateral,MembraneWall"
-)
+inactiveStokes:add(0.0, "p_stokes", "Membrane,Basolateral,MembraneWall")
 
 pressureTrace = PressureTraceConstraint(
-    "p_stokes", "p_darcy_scaled", "Apical,TripleJunction"
-)
+    "p_stokes", "p_darcy_scaled", "Apical,TripleJunction")
 pressureTrace:set_pressure_scale(pressureScale)
+
+-- Concentrations are fixed (zero) during the steady flow solve only.
+steadyTransportBoundary = DirichletBoundary()
+for _, soluteKey in ipairs(soluteOrder) do
+    for _, compartment in ipairs(compartmentOrder) do
+        steadyTransportBoundary:add(0.0, transportFields[soluteKey][compartment],
+                                    transportFieldSubsets[compartment])
+    end
+end
 
 domainDisc = DomainDiscretization(approxSpace)
 domainDisc:add(stokesEq)
@@ -355,523 +325,580 @@ domainDisc:add(pressureTrace)
 domainDisc:add(darcyOuterPressure)
 domainDisc:add(inactiveDarcy)
 domainDisc:add(inactiveStokes)
--- Fix every concentration field only during the initial steady-flow solve.
--- The transient coupled discretization below replaces this boundary object.
-steadyTransportBoundary = DirichletBoundary()
-for _, soluteKey in ipairs(soluteOrder) do
-    for _, compartment in ipairs(compartmentOrder) do
-        steadyTransportBoundary:add(
-            0.0, transportFields[soluteKey][compartment],
-            transportFieldSubsets[compartment])
-    end
-end
 domainDisc:add(steadyTransportBoundary)
 domainDisc:add(OneSideP1Constraints())
 
 darcyPressure = pressureScale * darcyMembraneEq:value()
-
 for _, component in ipairs({
     {"u", util.CreateConstUserVector3d(1.0, 0.0, 0.0)},
     {"v", util.CreateConstUserVector3d(0.0, 1.0, 0.0)},
     {"w", util.CreateConstUserVector3d(0.0, 0.0, 1.0)}
 }) do
-    interfaceTraction = NeumannBoundary(component[1], "fv1")
-    interfaceTraction:add(
-        darcyPressure * component[2], "Apical", "Lumen"
-    )
+    local interfaceTraction = NeumannBoundary(component[1], "fv1")
+    interfaceTraction:add(darcyPressure * component[2], "Apical", "Lumen")
     domainDisc:add(interfaceTraction)
-
-    outletTraction = NeumannBoundary(component[1], "fv1")
-    outletTraction:add(
-        outletKinematicPressure * component[2], "Outlet", "Lumen"
-    )
+    local outletTraction = NeumannBoundary(component[1], "fv1")
+    outletTraction:add(outletKinematicPressure * component[2], "Outlet", "Lumen")
     domainDisc:add(outletTraction)
 end
 
 --------------------------------------------------------------------------------
--- Solver
+-- Flow solver.  FE Darcy: BiCGStab + GMG (RAP, Uzawa with line Gauss-Seidel)
+-- as code/flow/nephron_flow_fourth_pad100.lua.  FV1 Darcy: GMRES(100) + GMG
+-- (Uzawa with ILU), 2026-11-24.
 --------------------------------------------------------------------------------
 
-mainInverse = LineGaussSeidel(approxSpace)
-mainInverse:set_num_steps(1, 1, 1, 1, 1, 1)
-
-pressureInverse = ILU()
-pressureInverse:set_damp(1.0)
-pressureInverse:set_inversion_eps(1.0e-30)
+if darcyScheme == "FE" then
+    flowRegularInverse = LineGaussSeidel(approxSpace)
+    flowRegularInverse:set_num_steps(1, 1, 1, 1, 1, 1)
+else
+    flowRegularInverse = ILU()
+    flowRegularInverse:set_damp(1.0)
+    flowRegularInverse:set_inversion_eps(1.0e-30)
+end
+flowPressureInverse = ILU()
+flowPressureInverse:set_damp(1.0)
+flowPressureInverse:set_inversion_eps(1.0e-30)
 
 uzawa = UzawaBase({"p_stokes"})
-uzawa:set_forward_iter(mainInverse)
-uzawa:set_schur_iter(pressureInverse)
-uzawa:set_backward_iter(mainInverse)
+uzawa:set_forward_iter(flowRegularInverse)
+uzawa:set_schur_iter(flowPressureInverse)
+uzawa:set_backward_iter(flowRegularInverse)
 
 schurMassEq = ConvectionDiffusionFV1("p_stokes", "Lumen")
 schurMassEq:set_mass_scale(1.0)
 schurMassEq:set_diffusion(0.0)
-
 schurMassDisc = DomainDiscretization(approxSpace)
 schurMassDisc:add(schurMassEq)
 schurMassDisc:add(OneSideP1Constraints())
-
 schurMassOp = AssembledLinearOperator(schurMassDisc)
-uzawa:set_schur_operator_update(
-    schurMassOp, 1.0 / kinematicViscosity
-)
+uzawa:set_schur_operator_update(schurMassOp, 1.0 / kinematicViscosity)
 
-solverDesc =
-{
-    type = "bicgstab", -- verified linear outer solver
-    precond =
-    {
-        type = "gmg", -- verified scalable multilevel preconditioner
-        approxSpace = approxSpace,
-        discretization = domainDisc,
-        rap = true, -- verified Galerkin coarse operators for this coupling
-        smoother = uzawa, -- verified Stokes pressure-block smoother
-        cycle = "V",
-        preSmooth = 2,
-        postSmooth = 2,
-        baseSolver = "superlu", -- coarse grid only; not the refined solver
-        baseLevel = 0,
-        gatheredBaseSolverIfAmbiguous = true,
-        transfer =
-        {
-            type = "std",
-            restrictionDamp = 1.0,
-            prolongationDamp = 1.0,
-            enableP1LagrangeOptimization = true
-        }
-    },
-    convCheck =
-    {
-        type = "standard",
-        iterations = 400,
-        absolute = 1.0e-14,
-        reduction = 1.0e-8,
-        verbose = true
+-- No direct (sparse LU) solver anywhere, not even on the coarsest grid: the
+-- target is a very large distributed system.  The GMG coarse level is solved
+-- iteratively, in parallel (not gathered), to a tight tolerance so the outer
+-- (non-flexible) Krylov method sees an essentially fixed preconditioner.
+-- On a run with numRefs = 0 the multigrid has a single level, so this
+-- coarse solve is the whole preconditioner.
+coarseSolverReduction = 1.0e-10
+coarseSolverMaxIterations = 2000
+function IterativeCoarseSolver()
+    return {
+        type = "bicgstab",
+        precond = {type = "ilu"},
+        convCheck = {type = "standard", iterations = coarseSolverMaxIterations,
+                     absolute = 1.0e-14, reduction = coarseSolverReduction,
+                     verbose = false}
     }
-}
+end
 
+-- Known limit (2026-11-26, best mesh): at r2 this coarse solve of the
+-- Galerkin coarse Stokes--Darcy operator does not reach 1e-10 in 2000
+-- iterations and the steady flow solve aborts; accepting the inexact coarse
+-- iterate instead makes the outer BiCGStab diverge.
 util.solver.defaults.approxSpace = approxSpace
-solver = util.solver.CreateLinearSolver(solverDesc)
+if darcyScheme == "FE" then flowSolver = BiCGStab() else flowSolver = GMRES(100) end
+flowSolver:set_preconditioner(util.solver.CreatePreconditioner({
+    type = "gmg", approxSpace = approxSpace, discretization = domainDisc,
+    rap = true, smoother = uzawa, cycle = "V", preSmooth = 2, postSmooth = 2,
+    baseSolver = IterativeCoarseSolver(), baseLevel = 0,
+    transfer = {type = "std", restrictionDamp = 1.0, prolongationDamp = 1.0,
+                enableP1LagrangeOptimization = true}
+}))
+flowSolver:set_convergence_check(util.solver.CreateConvCheck({
+    type = "standard", iterations = 400, absolute = 1.0e-14,
+    reduction = 1.0e-8, verbose = true
+}))
 
-matrix = AssembledLinearOperator(domainDisc)
+flowMatrix = AssembledLinearOperator(domainDisc)
 solution = GridFunction(approxSpace)
 rightHandSide = solution:clone()
 solution:set(0.0)
-
 domainDisc:adjust_solution(solution)
 solution:set_consistent_storage_type()
-domainDisc:assemble_linear(matrix, rightHandSide)
+domainDisc:assemble_linear(flowMatrix, rightHandSide)
 
-print("Solving...")
-solveStartTime = GetClockS()
-
-solver:init(matrix, solution)
-if not solver:apply(solution, rightHandSide) then
-    print("Solver failed")
+flowInitialDefectVector = solution:clone()
+domainDisc:assemble_defect(flowInitialDefectVector, solution)
+flowInitialDefect = VecNorm(flowInitialDefectVector)
+flowInitialDefectVector = nil
+print("Solving steady flow...")
+flowSolveStart = GetClockS()
+flowSolver:init(flowMatrix, solution)
+if not flowSolver:apply(solution, rightHandSide) then
+    print("Flow solver failed")
     exit()
 end
-
-solveTime = GetClockS() - solveStartTime
+flowSolveTime = GetClockS() - flowSolveStart
 solution:set_consistent_storage_type()
 
--- Capture the separate interface rows before PressureTraceConstraint merges
--- them. This measures the exact algebraic normal-flux conservation equation.
+-- Exact algebraic interface conservation (rows captured before the merge).
 interfaceDefect = solution:clone()
 pressureTrace:capture_next_interface_defect()
 domainDisc:assemble_defect(interfaceDefect, solution)
-interfaceDefectSums = pressureTrace:interface_defect_sums()
-stokesInterfaceResidualFlux = interfaceDefectSums[1]
-darcyInterfaceResidualFlux = interfaceDefectSums[2]
-interfaceFluxMismatch = interfaceDefectSums[3]
+interfaceSums = pressureTrace:interface_defect_sums()
+stokesInterfaceFlux = interfaceSums[1]
+darcyInterfaceFlux = interfaceSums[2]
+interfaceMismatchPercent = 100.0 * math.abs(interfaceSums[3]) /
+    math.max(math.abs(stokesInterfaceFlux), math.abs(darcyInterfaceFlux), 1e-30)
 
---------------------------------------------------------------------------------
--- Results and output
---------------------------------------------------------------------------------
-
-physicalSolution = solution:clone()
-physicalScaleFactors = {1.0, 1.0, 1.0, 1.0, pressureScale}
-for _ = 1, #soluteOrder * #compartmentOrder do
-    physicalScaleFactors[#physicalScaleFactors + 1] = 1.0
-end
-ScaleGF(
-    physicalSolution, solution,
-    physicalScaleFactors
-)
-physicalSolution:set_consistent_storage_type()
-
-stokesVelocity = stokesEq:velocity()
-
+-- Darcy water flux leaving through the outer boundaries (reconstructed).
 darcyMembraneVelocity = DarcyVelocityLinker()
-darcyMembraneVelocity:set_permeability(membranePermeability)
+darcyMembraneVelocity:set_permeability(membranePermeability * pressureScale)
 darcyMembraneVelocity:set_viscosity(kinematicViscosity)
 darcyMembraneVelocity:set_density(1.0)
 darcyMembraneVelocity:set_gravity(ConstUserVector(0.0))
-darcyMembraneVelocity:set_pressure_gradient(darcyMembraneEq:gradient())
-
+darcyMembraneVelocity:set_pressure_gradient(
+    ExplicitGridFunctionGradient(solution, "p_darcy_scaled"))
 darcyInterVelocity = DarcyVelocityLinker()
-darcyInterVelocity:set_permeability(interPermeability)
+darcyInterVelocity:set_permeability(interPermeability * pressureScale)
 darcyInterVelocity:set_viscosity(kinematicViscosity)
 darcyInterVelocity:set_density(1.0)
 darcyInterVelocity:set_gravity(ConstUserVector(0.0))
-darcyInterVelocity:set_pressure_gradient(darcyInterEq:gradient())
+darcyInterVelocity:set_pressure_gradient(
+    ExplicitGridFunctionGradient(solution, "p_darcy_scaled"))
 
-inletFlow = IntegralNormalComponentOnManifold(
-    stokesVelocity, physicalSolution, "Inlet", "Lumen"
-)
-outletFlow = IntegralNormalComponentOnManifold(
-    stokesVelocity, physicalSolution, "Outlet", "Lumen"
-)
-apicalFlow = IntegralNormalComponentOnManifold(
-    stokesVelocity, physicalSolution, "Apical", "Lumen"
-)
-darcyApicalFlow = IntegralNormalComponentOnManifold(
-    darcyMembraneVelocity, physicalSolution, "Apical", "Membrane"
-)
+outerWallWater = IntegralNormalComponentOnManifold(
+    darcyInterVelocity, solution, "OuterWall", "Inter")
+membraneWallWater = IntegralNormalComponentOnManifold(
+    darcyMembraneVelocity, solution, "MembraneWall", "Membrane")
 
-interfaceFluxScale = math.max(
-    math.abs(stokesInterfaceResidualFlux),
-    math.abs(darcyInterfaceResidualFlux), 1.0e-30
-)
-interfaceFluxMismatchPercent =
-    100.0 * math.abs(interfaceFluxMismatch) / interfaceFluxScale
-
-flowBalance = inletFlow + outletFlow + apicalFlow
-flowBalancePercent = 100.0 * math.abs(flowBalance) / math.abs(inletFlow)
-
+print(string.format("Flow solver time: %.3f s", flowSolveTime))
 print(string.format(
-    "Flow [mm^3/s]: inlet=%.6e, outlet=%.6e, apical=%.6e",
-    inletFlow, outletFlow, apicalFlow
-))
+    "Assembled interface rows [mm^3/s]: Stokes=%.6e Darcy=%.6e " ..
+    "(mismatch %.3g%%); reabsorbed %.4f%% of Q",
+    stokesInterfaceFlux, darcyInterfaceFlux, interfaceMismatchPercent,
+    100.0 * math.abs(darcyInterfaceFlux) / inletFlowRate))
 print(string.format(
-    "Lumen balance: %.6e mm^3/s (%.4f%%)",
-    flowBalance, flowBalancePercent
-))
-print(string.format(
-    "Assembled interface rows [mm^3/s]: Stokes=%.6e, Darcy=%.6e",
-    stokesInterfaceResidualFlux, darcyInterfaceResidualFlux
-))
-print(string.format(
-    "Assembled interface conservation: sum=%.6e mm^3/s (%.6g%%)",
-    interfaceFluxMismatch, interfaceFluxMismatchPercent
-))
-print(string.format(
-    "Reconstructed Apical fluxes [mm^3/s]: Stokes=%.6e, Darcy=%.6e",
-    apicalFlow, darcyApicalFlow
-))
-
-if interfaceFluxMismatchPercent > interfaceConservationTolerancePercent then
-    print(string.format(
-        "Interface conservation failed: %.6g%% > %.6g%%",
-        interfaceFluxMismatchPercent,
-        interfaceConservationTolerancePercent
-    ))
+    "Darcy water out [mm^3/s]: OuterWall=%.6e MembraneWall=%.6e",
+    outerWallWater, membraneWallWater))
+if interfaceMismatchPercent > interfaceConservationTolerancePercent then
+    print("Interface conservation failed")
     exit()
 end
-
-lumenOutput = VTKOutput()
-lumenOutput:clear_selection()
-lumenOutput:select_nodal({"u", "v", "w"}, "velocity_mm_s")
-lumenOutput:select_nodal("p_stokes", "pressure_kinematic")
-lumenOutput:print_subsets(
-    outputName .. "_lumen", physicalSolution, "Lumen", 0, 0.0
-)
-
-function VectorComponents(vectorData)
-    local components = {}
-    for component = 0, 2 do
-        components[component + 1] = UserVectorEntryAdapter3d()
-        components[component + 1]:set_vector(vectorData, component)
-    end
-    return components
-end
-
-function WriteDarcyOutput(suffix, subset, velocity)
-    local components = VectorComponents(velocity)
-    local output = VTKOutput()
-    output:clear_selection()
-    output:select_nodal(
-        "p_darcy_scaled", "pressure_kinematic"
-    )
-    output:select_element(velocity, "velocity_mm_s")
-    output:select_element(components[1], "u")
-    output:select_element(components[2], "v")
-    output:select_element(components[3], "w")
-    output:print_subsets(
-        outputName .. suffix, physicalSolution, subset, 0, 0.0
-    )
-end
-
-WriteDarcyOutput(
-    "_membrane", "Membrane", darcyMembraneVelocity
-)
-WriteDarcyOutput(
-    "_inter", "Inter", darcyInterVelocity
-)
-
-totalTime = GetClockS() - totalStartTime
-
-print(string.format("Solver time: %.3f s", solveTime))
-print(string.format("Total time:  %.3f s", totalTime))
 print("Steady flow stage complete")
 
 --------------------------------------------------------------------------------
--- Quasi-steady transient transport discretization
+-- Transient transport discretization (block solve per step)
 --------------------------------------------------------------------------------
 
--- This follows the validated nephron_flow_urea_transient.lua formulation.
--- Flow and all concentrations share one approximation space, so UG4 can
--- evaluate the native FV1 integration-point velocity with the element-local
--- mixed solution. The steady flow equations carry no time mass and are
--- re-enforced at every backward-Euler transport level (quasi-steady flow).
-transportSpace = approxSpace
--- Keep the pressure-stabilized FV1 velocity values while treating the
--- converged flow as a one-way coefficient in the transport Jacobian.  This is
--- essential on refined grids: concentration must not drive a flow correction.
+-- Convective velocities are the face fluxes of the flow discretization
+-- (Stokes velocity_ip, Darcy gradient exports), used as one-way
+-- coefficients: concentrations do not feed back on the flow, so the
+-- Jacobian is block lower-triangular and the flow-then-transport block solve
+-- per step is exact.  velocity_ip is why flow and transport share one space.
 stokesEq:set_velocity_ip_explicit(true)
-transportStokesVelocity = stokesEq:velocity_ip()
-outputStokesVelocity = stokesEq:velocity()
+-- All flow element discs are time-dependent (Stokes keeps its velocity time
+-- derivative; Darcy has zero mass).  Do NOT mark only stokesEq stationary:
+-- backward Euler scales the stiffness of time-dependent discs by dt, so a
+-- stationary Stokes block next to time-dependent tractions, inflow and the
+-- merged Darcy rows makes the flow defect inconsistent (5e3 at the steady
+-- solution, 2026-11-25).  Starting from the steady flow the time derivative
+-- is zero, so the flow stays quasi-steady; the same setup is the transient
+-- flow model.
+lumenVelocity = stokesEq:velocity_ip()
 
-transportMembraneVelocity = DarcyVelocityLinker()
-transportMembraneVelocity:set_permeability(membranePermeability * pressureScale)
-transportMembraneVelocity:set_viscosity(kinematicViscosity)
-transportMembraneVelocity:set_density(1.0)
-transportMembraneVelocity:set_gravity(ConstUserVector(0.0))
-transportMembraneVelocity:set_pressure_gradient(darcyMembraneEq:gradient())
-transportMembraneVelocity:set_derivative_mask(1)
+function MakeDarcyTransportVelocity(eq, permeability)
+    local velocity = DarcyVelocityLinker()
+    velocity:set_permeability(permeability * pressureScale)
+    velocity:set_viscosity(kinematicViscosity)
+    velocity:set_density(1.0)
+    velocity:set_gravity(ConstUserVector(0.0))
+    velocity:set_pressure_gradient(eq:gradient())
+    velocity:set_derivative_mask(1)
+    return velocity
+end
+membraneVelocity = MakeDarcyTransportVelocity(darcyMembraneEq, membranePermeability)
+interVelocity = MakeDarcyTransportVelocity(darcyInterEq, interPermeability)
+compartmentVelocity = {lumen = lumenVelocity, membrane = membraneVelocity,
+                       inter = interVelocity}
+-- NoNormalStressOutflow puts the standard nodal (P1) velocity interpolation
+-- into the Outlet continuity rows; the solute outflow must use the same.
+-- The coupled solution (flow and concentrations); initialised from the
+-- converged steady flow, concentrations are set below.
+transportSolution = solution:clone()
+outletVelocity = ExplicitGridFunctionVector(transportSolution, "u,v,w")
 
-transportInterVelocity = DarcyVelocityLinker()
-transportInterVelocity:set_permeability(interPermeability * pressureScale)
-transportInterVelocity:set_viscosity(kinematicViscosity)
-transportInterVelocity:set_density(1.0)
-transportInterVelocity:set_gravity(ConstUserVector(0.0))
-transportInterVelocity:set_pressure_gradient(darcyInterEq:gradient())
-transportInterVelocity:set_derivative_mask(1)
-
-transportDisc = DomainDiscretization(transportSpace)
-transportDisc:add(stokesEq)
-transportDisc:add(stokesInlet)
-transportDisc:add(stokesOpenBoundary)
-transportDisc:add(stokesRim)
-transportDisc:add(stokesBJS)
-transportDisc:add(darcyMembraneEq)
-transportDisc:add(darcyInterEq)
-transportDisc:add(pressureTrace)
-transportDisc:add(darcyOuterPressure)
-transportDisc:add(inactiveDarcy)
-transportDisc:add(inactiveStokes)
-
-for _, component in ipairs({
-    {"u", util.CreateConstUserVector3d(1.0, 0.0, 0.0)},
-    {"v", util.CreateConstUserVector3d(0.0, 1.0, 0.0)},
-    {"w", util.CreateConstUserVector3d(0.0, 0.0, 1.0)}
-}) do
-    local coupledInterfaceTraction = NeumannBoundary(component[1], "fv1")
-    coupledInterfaceTraction:add(
-        darcyPressure * component[2], "Apical", "Lumen")
-    transportDisc:add(coupledInterfaceTraction)
-
-    local coupledOutletTraction = NeumannBoundary(component[1], "fv1")
-    coupledOutletTraction:add(
-        outletKinematicPressure * component[2], "Outlet", "Lumen")
-    transportDisc:add(coupledOutletTraction)
+-- Element discs that export the convective velocities.
+function AddFlowExporters(disc)
+    disc:add(stokesEq)
+    disc:add(darcyMembraneEq)
+    disc:add(darcyInterEq)
 end
 
+-- The complete Stokes--Darcy system with all its boundary conditions.
+function AddFlowSystem(disc)
+    AddFlowExporters(disc)
+    disc:add(stokesInlet)
+    disc:add(stokesOpenBoundary)
+    disc:add(stokesRim)
+    disc:add(stokesBJS)
+    disc:add(pressureTrace)
+    disc:add(darcyOuterPressure)
+    disc:add(inactiveDarcy)
+    disc:add(inactiveStokes)
+    for _, component in ipairs({
+        {"u", util.CreateConstUserVector3d(1.0, 0.0, 0.0)},
+        {"v", util.CreateConstUserVector3d(0.0, 1.0, 0.0)},
+        {"w", util.CreateConstUserVector3d(0.0, 0.0, 1.0)}
+    }) do
+        local traction = NeumannBoundary(component[1], "fv1")
+        traction:add(darcyPressure * component[2], "Apical", "Lumen")
+        disc:add(traction)
+        local outlet = NeumannBoundary(component[1], "fv1")
+        outlet:add(outletKinematicPressure * component[2], "Outlet", "Lumen")
+        disc:add(outlet)
+    end
+end
+
+-- Convective outflow c (u.n) on open boundaries.
+function MakeOutflow(field, velocityData, valueData, boundary, volume)
+    local flux = ScaleAddLinkerVector()
+    flux:add(valueData, velocityData)
+    local neumann = NeumannBoundary(field, "fv1")
+    neumann:add(flux, boundary, volume)
+    return neumann
+end
+
+-- Solute influx with the inlet water.  NavierStokesInflow adds the water
+-- inflow to the continuity rows as an FV1 Neumann flux of InletVelocity.n on
+-- every Inlet face, including faces of the non-Dirichlet rim boxes
+-- (TripleJunction).  The identical flux times c_inlet gives those boxes their
+-- solute; without it they receive solute-free water and dilute.  Rows of the
+-- Dirichlet Inlet vertices are overwritten by the concentration boundary.
+inletVelocityData = LuaUserVector("InletVelocity")
+function MakeInletInflow(field, concentration)
+    local flux = ScaleAddLinkerVector()
+    flux:add(ConstUserNumber(concentration), inletVelocityData)
+    local neumann = NeumannBoundary(field, "fv1")
+    neumann:add(flux, "Inlet", "Lumen")
+    return neumann
+end
+
+-- Block solve per step.  Transport block: the flow element discs are kept
+-- only to export the velocities; every flow DoF keeps its current value (the
+-- flow just solved), so its rows are identities and the block contains the
+-- transport rows only.
+function HoldFields(boundary, fields, subsets)
+    for _, field in ipairs(fields) do boundary:add(field, subsets) end
+end
+flowHold = DirichletBoundary()
+HoldFields(flowHold, {"u", "v", "w"}, velocitySubsets)
+HoldFields(flowHold, {"p_stokes"}, stokesPressureSubsets)
+HoldFields(flowHold, {"p_darcy_scaled"}, allSubsets)
+
+transportDisc = DomainDiscretization(approxSpace)
+AddFlowExporters(transportDisc)
+transportDisc:add(flowHold)
 transportEquations = {}
 for _, soluteKey in ipairs(soluteOrder) do
-    local parameter = soluteParameters[soluteKey]
+    local p = soluteParameters[soluteKey]
     local fields = transportFields[soluteKey]
-    local equations = {}
-
-    equations.lumen = ConvectionDiffusionFV1(fields.lumen, "Lumen")
-    equations.lumen:set_diffusion(parameter.diffusion)
-    equations.lumen:set_velocity(transportStokesVelocity)
-    equations.lumen:set_upwind(FullUpwind())
-    transportDisc:add(equations.lumen)
-
-    equations.membrane = ConvectionDiffusionFV1(
-        fields.membrane, "Membrane")
-    equations.membrane:set_diffusion(parameter.diffusion)
-    equations.membrane:set_velocity(transportMembraneVelocity)
-    equations.membrane:set_upwind(FullUpwind())
-    transportDisc:add(equations.membrane)
-
-    equations.inter = ConvectionDiffusionFV1(fields.inter, "Inter")
-    equations.inter:set_diffusion(parameter.diffusion)
-    equations.inter:set_velocity(transportInterVelocity)
-    equations.inter:set_upwind(FullUpwind())
-    transportDisc:add(equations.inter)
-
-    if parameter.apicalPermeability > 0.0 then
-        local leak = Leak({fields.lumen, fields.membrane})
-        leak:set_permeability(parameter.apicalPermeability)
-        local transport = MembraneTransportFV1("Apical", leak)
-        transport:set_density_function(membraneTransportDensity)
-        transportDisc:add(transport)
+    local eqs = {}
+    for _, compartment in ipairs(compartmentOrder) do
+        local eq = ConvectionDiffusionFV1(fields[compartment],
+                                          compartmentVolume[compartment])
+        eq:set_diffusion(p.diffusion)
+        eq:set_velocity(compartmentVelocity[compartment])
+        eq:set_upwind(FullUpwind())
+        transportDisc:add(eq)
+        eqs[compartment] = eq
     end
 
-    if parameter.basolateralPermeability > 0.0 then
-        local leak = Leak({fields.membrane, fields.inter})
-        leak:set_permeability(parameter.basolateralPermeability)
-        local transport = MembraneTransportFV1("Basolateral", leak)
-        transport:set_density_function(membraneTransportDensity)
-        transportDisc:add(transport)
-    end
+    local apicalLeak = Leak({fields.lumen, fields.membrane})
+    apicalLeak:set_permeability(p.apicalPermeability)
+    local apical = MembraneTransportFV1("Apical", apicalLeak)
+    apical:set_density_function(1.0)
+    transportDisc:add(apical)
+    eqs.membraneDiscs = {apical}
 
-    -- FV1 convection needs the open-boundary c*u.n term explicitly.
-    local outletFlux = ScaleAddLinkerVector()
-    outletFlux:add(equations.lumen:value(), transportStokesVelocity)
-    local outletBoundary = NeumannBoundary(fields.lumen, "fv1")
-    outletBoundary:add(outletFlux, "Outlet", "Lumen")
-    transportDisc:add(outletBoundary)
+    local basolateralLeak = Leak({fields.membrane, fields.inter})
+    basolateralLeak:set_permeability(p.basolateralPermeability)
+    local basolateral = MembraneTransportFV1("Basolateral", basolateralLeak)
+    basolateral:set_density_function(1.0)
+    transportDisc:add(basolateral)
+    eqs.membraneDiscs[#eqs.membraneDiscs + 1] = basolateral
 
-    transportEquations[soluteKey] = equations
+    eqs.neumannDiscs = {
+        MakeInletInflow(fields.lumen, p.inlet),
+        MakeOutflow(fields.lumen, outletVelocity, eqs.lumen:value(),
+                    "Outlet", "Lumen")}
+    for _, neumann in ipairs(eqs.neumannDiscs) do transportDisc:add(neumann) end
+    transportEquations[soluteKey] = eqs
 end
-
+-- Inlet: inlet concentration.  OuterWall: fixed bath (Inter initial
+-- value).  The Darcy pressure is Dirichlet on OuterWall, so the water leaving
+-- there is the internal FV1 face flux into those boxes; a fixed bath
+-- concentration is the consistent (and natural) transport condition.
 concentrationBoundary = DirichletBoundary()
 for _, soluteKey in ipairs(soluteOrder) do
-    local parameter = soluteParameters[soluteKey]
-    concentrationBoundary:add(
-        parameter.inlet, transportFields[soluteKey].lumen, "Inlet")
+    local p = soluteParameters[soluteKey]
+    concentrationBoundary:add(p.inlet, transportFields[soluteKey].lumen, "Inlet")
+    concentrationBoundary:add(p.interInitial, transportFields[soluteKey].inter,
+                              "OuterWall")
 end
 transportDisc:add(concentrationBoundary)
 transportDisc:add(OneSideP1Constraints())
 
-transportSolution = solution:clone()
+-- Flow block: the full Stokes--Darcy system (stationary, quasi-steady flow)
+-- with every concentration held.  Its Jacobian equals the steady-flow
+-- matrix, so the validated flow GMG (flowSolver) is reused.
+concentrationHold = DirichletBoundary()
 for _, soluteKey in ipairs(soluteOrder) do
-    local parameter = soluteParameters[soluteKey]
+    for _, compartment in ipairs(compartmentOrder) do
+        concentrationHold:add(transportFields[soluteKey][compartment],
+                              transportFieldSubsets[compartment])
+    end
+end
+flowStepDisc = DomainDiscretization(approxSpace)
+AddFlowSystem(flowStepDisc)
+flowStepDisc:add(concentrationHold)
+flowStepDisc:add(OneSideP1Constraints())
+
+for _, soluteKey in ipairs(soluteOrder) do
+    local p = soluteParameters[soluteKey]
     local fields = transportFields[soluteKey]
-    Interpolate(parameter.inlet, transportSolution, fields.lumen)
-    Interpolate(parameter.cellInitial, transportSolution, fields.membrane)
-    Interpolate(parameter.interInitial, transportSolution, fields.inter)
+    Interpolate(p.inlet, transportSolution, fields.lumen,
+                transportFieldSubsets.lumen)
+    Interpolate(p.cellInitial, transportSolution, fields.membrane,
+                transportFieldSubsets.membrane)
+    Interpolate(p.interInitial, transportSolution, fields.inter,
+                transportFieldSubsets.inter)
 end
 transportDisc:adjust_solution(transportSolution)
+transportSolution:set_consistent_storage_type()
 
-initialMasses = {}
+--------------------------------------------------------------------------------
+-- Discrete mass-balance diagnostics
+--------------------------------------------------------------------------------
+-- Lumped FV1 mass M = sum_i |box_i| c_i (exactly the transient mass term).
+-- R = spatial residual of all transport element discs (no concentration
+-- Dirichlet), evaluated exactly as in the time step: R_i = D_i/dt at the
+-- Dirichlet nodes, with D the backward-Euler defect of these discs for the
+-- step just solved (the flow is time-dependent, so its FV1 stabilization and
+-- hence velocity_ip depend on dt and the old solution; a separately assembled
+-- stationary residual would use a different velocity).
+-- Backward Euler gives |box_i|(c_i-c_i^old)/dt + R_i = 0 at every
+-- non-Dirichlet node, and c is fixed at Dirichlet nodes, hence
+--   dM/dt = -sum_all R + sum_Dirichlet R.
+-- Internal, diffusive and two-sided membrane fluxes cancel in sum_all R,
+-- which leaves the Neumann rows.  Hence, exactly,
+--   inflow  = -sum(inlet Neumann rows) + sum_{Inlet nodes} R
+--   outlet  =  sum(outlet Neumann rows)
+--   outer   = -sum_{OuterWall nodes} R      (net solute leaving to the bath)
+--   dM/dt   = inflow - outlet - outer.
+-- Any one-sided (non-cancelling) term appears as a balance error.
+
+massDisc = DomainDiscretization(approxSpace)
+stationaryDisc = DomainDiscretization(approxSpace)
+inletNeumannDisc = DomainDiscretization(approxSpace)
+outletNeumannDisc = DomainDiscretization(approxSpace)
+AddFlowExporters(stationaryDisc)
+for _, soluteKey in ipairs(soluteOrder) do
+    local p = soluteParameters[soluteKey]
+    local fields = transportFields[soluteKey]
+    for _, compartment in ipairs(compartmentOrder) do
+        local m = ConvectionDiffusionFV1(fields[compartment],
+                                         compartmentVolume[compartment])
+        m:set_diffusion(0.0)
+        m:set_reaction_rate(1.0)
+        massDisc:add(m)
+    end
+    inletNeumannDisc:add(MakeInletInflow(fields.lumen, p.inlet))
+    local outletValue = ConvectionDiffusionFV1(fields.lumen, "Lumen")
+    outletValue:set_diffusion(0.0)  -- zero rows; only provides value()
+    outletNeumannDisc:add(outletValue)
+    outletNeumannDisc:add(MakeOutflow(fields.lumen, outletVelocity,
+                                      outletValue:value(), "Outlet", "Lumen"))
+end
+-- the stationary residual uses the transport element discs themselves
+for _, soluteKey in ipairs(soluteOrder) do
+    local eqs = transportEquations[soluteKey]
+    for _, compartment in ipairs(compartmentOrder) do
+        stationaryDisc:add(eqs[compartment])
+    end
+    for _, membrane in ipairs(eqs.membraneDiscs) do
+        stationaryDisc:add(membrane)
+    end
+    for _, neumann in ipairs(eqs.neumannDiscs) do
+        stationaryDisc:add(neumann)
+    end
+end
+
+function Indicator(field, subsets)
+    local g = solution:clone()
+    g:set(0.0)
+    Interpolate(1.0, g, field, subsets)
+    g:set_consistent_storage_type()
+    return g
+end
+indicators = {}
 for _, soluteKey in ipairs(soluteOrder) do
     local fields = transportFields[soluteKey]
-    initialMasses[soluteKey] =
-        Integral(transportSolution, fields.lumen, "Lumen") +
-        Integral(transportSolution, fields.membrane, "Membrane") +
-        Integral(transportSolution, fields.inter, "Inter")
+    local all = solution:clone()
+    all:set(0.0)
+    for _, compartment in ipairs(compartmentOrder) do
+        Interpolate(1.0, all, fields[compartment],
+                    transportFieldSubsets[compartment])
+    end
+    all:set_consistent_storage_type()
+    indicators[soluteKey] = {
+        all = all,
+        inlet = Indicator(fields.lumen, "Inlet"),
+        outer = Indicator(fields.inter, "OuterWall"),
+        lumen = Indicator(fields.lumen, transportFieldSubsets.lumen),
+    }
+end
+
+diagDefect = solution:clone()
+
+budgetTimeDisc = ThetaTimeStep(stationaryDisc, 1.0)
+
+-- oldSeries/stepDt: the time series and step of the step just solved (before
+-- it is pushed); nil at t = 0 (mass only).
+function SoluteBudget(currentSolution, oldSeries, stepDt)
+    local budget = {}
+    diagDefect:set(0.0)
+    massDisc:assemble_defect(diagDefect, currentSolution)
+    for _, soluteKey in ipairs(soluteOrder) do
+        budget[soluteKey] = {mass = VecProd(diagDefect, indicators[soluteKey].all)}
+    end
+    if oldSeries == nil then return budget end
+    diagDefect:set(0.0)
+    budgetTimeDisc:prepare_step(oldSeries, stepDt)
+    budgetTimeDisc:assemble_defect(diagDefect, currentSolution)
+    for _, soluteKey in ipairs(soluteOrder) do
+        local b = budget[soluteKey]
+        b.inletDirichlet = VecProd(diagDefect, indicators[soluteKey].inlet) / stepDt
+        b.outer = -VecProd(diagDefect, indicators[soluteKey].outer) / stepDt
+    end
+    diagDefect:set(0.0)
+    inletNeumannDisc:assemble_defect(diagDefect, currentSolution)
+    for _, soluteKey in ipairs(soluteOrder) do
+        local b = budget[soluteKey]
+        b.inflow = b.inletDirichlet - VecProd(diagDefect, indicators[soluteKey].lumen)
+    end
+    diagDefect:set(0.0)
+    outletNeumannDisc:assemble_defect(diagDefect, currentSolution)
+    for _, soluteKey in ipairs(soluteOrder) do
+        budget[soluteKey].outlet = VecProd(diagDefect, indicators[soluteKey].lumen)
+    end
+    return budget
+end
+
+-- Positivity at vertex DoFs.  (A convex-hull bound does not hold: with no
+-- solvent drag, water crossing Apical/Basolateral leaves its solute behind,
+-- which concentrates the source side; ranges are checked from the VTU output.)
+function CheckBounds(currentSolution)
+    local ok = true
+    for _, soluteKey in ipairs(soluteOrder) do
+        for _, compartment in ipairs(compartmentOrder) do
+            local field = transportFields[soluteKey][compartment]
+            if not CheckGFValuesWithinBounds(currentSolution, field, 0.0, 1.0e6) then
+                print("POSITIVITY FAILED: " .. field)
+                ok = false
+            end
+        end
+    end
+    return ok
+end
+
+previousBudget = SoluteBudget(transportSolution)
+maxBalanceErrorPercent = 0.0
+for _, soluteKey in ipairs(soluteOrder) do
+    local b = previousBudget[soluteKey]
+    print(string.format("BUDGET t=0 %s: mass=%.10e (mM mm^3)",
+                        soluteParameters[soluteKey].label, b.mass))
 end
 
 --------------------------------------------------------------------------------
--- Scalable nonlinear solver
+-- Block solvers
 --------------------------------------------------------------------------------
+-- A monolithic GMG on all 17 fields stalled at r1 (coarse Uzawa solve did
+-- not converge, flow rows erratic; 2026-11-25/26).  Each step therefore
+-- solves (1) the flow block with the validated flow GMG and (2) the
+-- transport block with its own GMG.  Both blocks are linear: the transport
+-- Jacobian is assembled once (rebuilt only if the flow changes) and each
+-- step performs defect correction u <- u - J^{-1} d(u) with the exact defect.
 
--- Full-system multigrid block smoother.  Uzawa isolates the Stokes pressure;
--- ILU acts on the remaining flow and four algebraically independent
--- three-compartment transport blocks while preserving their matrix sparsity.
-transportRegularInverse = ILU()
-transportRegularInverse:set_damp(0.8)
-transportRegularInverse:set_inversion_eps(1.0e-30)
-transportPressureInverse = ILU()
-transportPressureInverse:set_damp(1.0)
-transportPressureInverse:set_inversion_eps(1.0e-30)
-transportUzawa = UzawaBase({"p_stokes"})
-transportUzawa:set_forward_iter(transportRegularInverse)
-transportUzawa:set_schur_iter(transportPressureInverse)
-transportUzawa:set_backward_iter(transportRegularInverse)
-transportUzawa:set_schur_operator_update(
-    schurMassOp, 1.0 / kinematicViscosity)
+timeDisc = ThetaTimeStep(transportDisc, 1.0)
 
-util.solver.defaults.approxSpace = transportSpace
-transportSolverConfig = {
-    type = "newton",
-    convCheck = {
-        type = "standard", iterations = 30,
-        absolute = 1.0e-10, reduction = 1.0e-8, verbose = true
+-- Transport block: BiCGStab + GMG (Galerkin coarse operators, ILU smoother,
+-- iterative BiCGStab/ILU coarse solve; no direct solver).  On the 10 um
+-- shell mesh this converges in 6 (r1) and 8-10 (r2) iterations for the
+-- diffusion+leak test (2026-11-26).
+util.solver.defaults.approxSpace = approxSpace
+transportLinearSolver = util.solver.CreateSolver({
+    type = "bicgstab",
+    precond = {
+        type = "gmg", approxSpace = approxSpace, discretization = timeDisc,
+        baseLevel = 0, rap = true, cycle = "V", preSmooth = 3, postSmooth = 3,
+        smoother = {type = "ilu", overlap = true},
+        transfer = "std",
+        baseSolver = IterativeCoarseSolver(),
     },
-    linSolver = {
-        type = "bicgstab",
-        precond = {
-            type = "gmg", approxSpace = transportSpace,
-            discretization = transportDisc, baseLevel = 0,
-            smoother = transportUzawa,
-            cycle = "V", preSmooth = 2, postSmooth = 2,
-            -- Rediscretize the complete coupled operator on each level.  RAP
-            -- mixes the differently supported 17-field blocks and destroys
-            -- the one-way block structure on the coarse level.
-            rap = false, transfer = "std", baseSolver = "superlu",
-            gatheredBaseSolverIfAmbiguous = true
-        },
-        convCheck = {
-            type = "standard", iterations = 400,
-            absolute = 1.0e-12, reduction = 1.0e-9, verbose = true
-        }
-    }
-}
-transportSolver = util.solver.CreateSolver(transportSolverConfig)
+    convCheck = {type = "standard", iterations = 200, absolute = 1.0e-14,
+                 reduction = 1.0e-10, verbose = false},
+})
+transportDefectAbsolute = 1.0e-10
+transportMaxCorrections = 3
+
+-- Flow block per step: solved when its defect exceeds flowStepTolerance
+-- (relative 1e-8 of the steady-flow initial defect, as the steady solve).
+flowStepConv = ConvCheck(400, 1.0e-14, 1.0e-8, false)
+flowStepTolerance = 1.0e-8 * flowInitialDefect
 
 --------------------------------------------------------------------------------
--- Compartment time-series output
+-- Compartment output
 --------------------------------------------------------------------------------
 
 outputTimes = {}
 lastOutputStep = 0
-compartmentOutputs = {
-    {name = "lumen", subset = "Lumen", velocity = transportStokesVelocity,
-     writer = VTKOutput()},
-    {name = "membrane", subset = "Membrane",
-     velocity = transportMembraneVelocity, writer = VTKOutput()},
-    {name = "inter", subset = "Inter", velocity = transportInterVelocity,
-     writer = VTKOutput()},
-}
-for _, compartment in ipairs(compartmentOutputs) do
-    compartment.writer:clear_selection()
+compartmentOutputs = {}
+for _, compartment in ipairs(compartmentOrder) do
+    local writer = VTKOutput()
+    writer:clear_selection()
     for _, soluteKey in ipairs(soluteOrder) do
-        local parameter = soluteParameters[soluteKey]
-        compartment.writer:select(
-            transportFields[soluteKey][compartment.name], parameter.label)
+        writer:select(transportFields[soluteKey][compartment],
+                      soluteParameters[soluteKey].label)
     end
-    compartment.writer:select_element(
-        compartment.velocity, "velocity_mm_s")
+    writer:select_element(compartmentVelocity[compartment], "velocity_mm_s")
+    compartmentOutputs[#compartmentOutputs + 1] = {
+        name = compartment, subset = compartmentVolume[compartment],
+        writer = writer}
 end
 
 function WriteSerialPVTU(prefix, step, time)
     if ProcRank() ~= 0 or NumProcs() ~= 1 then return end
-    local fileName = string.format("%s_t%04d.pvtu", prefix, step)
-    local file = assert(io.open(fileName, "w"),
-        "Cannot create PVTU file: " .. fileName)
+    local file = assert(io.open(string.format("%s_t%04d.pvtu", prefix, step), "w"))
     local basename = assert(prefix:match("([^/]+)$"))
-    file:write('<?xml version="1.0"?>\n')
-    file:write('<VTKFile type="PUnstructuredGrid" version="0.1" ',
-               'byte_order="LittleEndian">\n')
+    file:write('<?xml version="1.0"?>\n<VTKFile type="PUnstructuredGrid" ',
+               'version="0.1" byte_order="LittleEndian">\n')
     file:write(string.format('  <Time timestep="%.17g"/>\n', time))
-    file:write('  <PUnstructuredGrid GhostLevel="0">\n')
-    file:write('    <PPoints><PDataArray type="Float32" ',
-               'NumberOfComponents="3"/></PPoints>\n')
-    file:write('    <PPointData>\n')
+    file:write('  <PUnstructuredGrid GhostLevel="0">\n    <PPoints>',
+               '<PDataArray type="Float32" NumberOfComponents="3"/></PPoints>\n',
+               '    <PPointData>\n')
     for _, soluteKey in ipairs(soluteOrder) do
-        local parameter = soluteParameters[soluteKey]
-        file:write(string.format(
-            '      <PDataArray type="Float32" Name="%s" ', parameter.label),
-            'NumberOfComponents="1"/>\n')
+        file:write(string.format('      <PDataArray type="Float32" Name="%s" ' ..
+            'NumberOfComponents="1"/>\n', soluteParameters[soluteKey].label))
     end
-    file:write('    </PPointData>\n')
-    file:write('    <PCellData><PDataArray type="Float32" ',
+    file:write('    </PPointData>\n    <PCellData><PDataArray type="Float32" ',
                'Name="velocity_mm_s" NumberOfComponents="3"/></PCellData>\n')
-    file:write(string.format('    <Piece Source="%s_t%04d.vtu"/>\n',
-                             basename, step))
+    file:write(string.format('    <Piece Source="%s_t%04d.vtu"/>\n', basename, step))
     file:write('  </PUnstructuredGrid>\n</VTKFile>\n')
     file:close()
 end
 
 function WriteCompartmentPVD(prefix)
     if ProcRank() ~= 0 then return end
-    local file = assert(io.open(prefix .. ".pvd", "w"),
-        "Cannot create PVD file: " .. prefix .. ".pvd")
+    local file = assert(io.open(prefix .. ".pvd", "w"))
     local basename = assert(prefix:match("([^/]+)$"))
-    file:write('<?xml version="1.0"?>\n')
-    file:write('<VTKFile type="Collection" version="0.1" ',
+    file:write('<?xml version="1.0"?>\n<VTKFile type="Collection" version="0.1" ',
                'byte_order="LittleEndian">\n  <Collection>\n')
     for step = 0, lastOutputStep do
         if outputTimes[step] ~= nil then
-            file:write(string.format(
-                '    <DataSet timestep="%.17g" group="" part="0" ' ..
-                'file="%s_t%04d.pvtu"/>\n',
-                outputTimes[step], basename, step))
+            file:write(string.format('    <DataSet timestep="%.17g" group="" ' ..
+                'part="0" file="%s_t%04d.pvtu"/>\n', outputTimes[step], basename, step))
         end
     end
     file:write('  </Collection>\n</VTKFile>\n')
@@ -879,56 +906,151 @@ function WriteCompartmentPVD(prefix)
 end
 
 function WriteTransportOutput(currentSolution, step, time)
-    for _, compartment in ipairs(compartmentOutputs) do
-        local prefix = outputName .. "_" .. compartment.name
-        compartment.writer:print_subsets(
-            prefix, currentSolution, compartment.subset, step, time)
+    for _, c in ipairs(compartmentOutputs) do
+        local prefix = outputName .. "_" .. c.name
+        c.writer:print_subsets(prefix, currentSolution, c.subset, step, time)
         WriteSerialPVTU(prefix, step, time)
     end
     outputTimes[step] = time
     lastOutputStep = math.max(lastOutputStep, step)
-    for _, compartment in ipairs(compartmentOutputs) do
-        WriteCompartmentPVD(outputName .. "_" .. compartment.name)
+    for _, c in ipairs(compartmentOutputs) do
+        WriteCompartmentPVD(outputName .. "_" .. c.name)
     end
 end
+
+--------------------------------------------------------------------------------
+-- Time loop
+--------------------------------------------------------------------------------
 
 WriteTransportOutput(transportSolution, 0, 0.0)
+CheckBounds(transportSolution)
 
-timeDisc = ThetaTimeStep(transportDisc, 1.0)
-timeIntegrator = SimpleTimeIntegrator(timeDisc)
-timeIntegrator:set_solver(transportSolver)
-timeIntegrator:set_time_step(dt)
-transportSolver:init(AssembledOperator(transportDisc))
-transportSolver:prepare(transportSolution)
-
-transportObserver = LuaCallbackObserver()
-function StandaloneTransportOutputCallback(step, time, currentDt)
-    if step % outputEverySteps == 0 or time >= endTime - 1.0e-12 then
-        WriteTransportOutput(
-            transportObserver:get_current_solution(), step, time)
+function TransportStepCallback(step, time, currentDt, current, oldSeries)
+    local budget = SoluteBudget(current, oldSeries, currentDt)
+    for _, soluteKey in ipairs(soluteOrder) do
+        local b = budget[soluteKey]
+        local rate = (b.mass - previousBudget[soluteKey].mass) / currentDt
+        local net = b.inflow - b.outlet - b.outer
+        local scale = math.max(math.abs(b.inflow), math.abs(b.outlet),
+                               math.abs(b.outer), 1.0e-30)
+        local errorPercent = 100.0 * math.abs(rate - net) / scale
+        maxBalanceErrorPercent = math.max(maxBalanceErrorPercent, errorPercent)
+        print(string.format(
+            "BUDGET step=%d t=%.6g %s: mass=%.10e dM/dt=%.6e in=%.6e " ..
+            "outlet=%.6e outer=%.6e balance_err=%.3e%%",
+            step, time, soluteParameters[soluteKey].label, b.mass, rate,
+            b.inflow, b.outlet, b.outer, errorPercent))
     end
-    return 1
+    previousBudget = budget
+    if not CheckBounds(current) then positivityFailed = true end
+    if step % outputEverySteps == 0 or step == numSteps then
+        WriteTransportOutput(current, step, time)
+    end
 end
-transportObserver:set_callback("StandaloneTransportOutputCallback")
-timeIntegrator:attach_observer(transportObserver)
 
+solTimeSeries = SolutionTimeSeries()
+solTimeSeries:push(transportSolution:clone(), 0.0)
+gridLevel = transportSolution:grid_level()
+transportJacobian = AssembledLinearOperator(timeDisc, gridLevel)
+transportDefect = transportSolution:clone()
+transportCorrection = transportSolution:clone()
+
+flowDefect = transportSolution:clone()
+flowCorrection = transportSolution:clone()
+flowSolver:set_convergence_check(flowStepConv)
+
+-- The transport Jacobian depends on the (held) velocities; it is assembled
+-- once and rebuilt whenever the flow block changes the flow.
+function SetupTransportSolver()
+    timeDisc:assemble_jacobian(transportJacobian, transportSolution, gridLevel)
+    assert(transportLinearSolver:init(transportJacobian, transportSolution),
+           "Transport linear solver init failed")
+end
+
+print("Assembling transport Jacobian and initializing GMG...")
+transportStart = GetClockS()
+timeDisc:prepare_step(solTimeSeries, dt)
+SetupTransportSolver()
+print(string.format("Transport setup time: %.3f s", GetClockS() - transportStart))
+
+positivityFailed = false
+solverFailed = false
+numSteps = math.floor(endTime / dt + 0.5)
+time = 0.0
 print("Starting transient transport solve...")
-timeIntegrator:apply(
-    transportSolution, endTime, transportSolution, 0.0)
+for step = 1, numSteps do
+    timeDisc:prepare_step(solTimeSeries, dt)
+    timeDisc:prepare_step_elem(solTimeSeries, dt)
+    local converged = true
+    local log = {}
 
-for _, soluteKey in ipairs(soluteOrder) do
-    local parameter = soluteParameters[soluteKey]
-    local fields = transportFields[soluteKey]
-    local finalMass =
-        Integral(transportSolution, fields.lumen, "Lumen") +
-        Integral(transportSolution, fields.membrane, "Membrane") +
-        Integral(transportSolution, fields.inter, "Inter")
-    print(string.format(
-        "%s total mass integral: initial=%.17e final=%.17e change=%.17e",
-        parameter.label, initialMasses[soluteKey], finalMass,
-        finalMass - initialMasses[soluteKey]))
+    -- (1) Flow block (stationary Stokes--Darcy, concentrations held).
+    local flowStart = GetClockS()
+    flowStepDisc:assemble_defect(flowDefect, transportSolution)
+    local flowNorm = VecNorm(flowDefect)
+    local flowLog = string.format("flow %.3e", flowNorm)
+    if not (flowNorm == flowNorm) then converged = false end
+    if converged and flowNorm > flowStepTolerance then
+        flowCorrection:set(0.0)
+        if not flowSolver:apply_return_defect(flowCorrection, flowDefect) then
+            converged = false
+            flowLog = flowLog .. " flow-solver-failed"
+        end
+        VecScaleAdd2(transportSolution, 1.0, transportSolution,
+                     -1.0, flowCorrection)
+        flowStepDisc:assemble_defect(flowDefect, transportSolution)
+        flowLog = flowLog .. string.format(" (lin %d) -> %.3e",
+                                           flowStepConv:step(), VecNorm(flowDefect))
+        SetupTransportSolver()
+    else
+        flowLog = flowLog .. " (held)"
+    end
+    local flowTime = GetClockS() - flowStart
+
+    -- (2) Transport block (flow DoFs held at the new flow).
+    local transportStepStart = GetClockS()
+    for correction = 0, transportMaxCorrections do
+        timeDisc:assemble_defect(transportDefect, transportSolution, gridLevel)
+        local norm = VecNorm(transportDefect)
+        log[#log + 1] = string.format("%.3e", norm)
+        if not (norm == norm) or norm > 1.0e30 then converged = false; break end
+        if norm < transportDefectAbsolute then break end
+        if correction == transportMaxCorrections then converged = false; break end
+        transportCorrection:set(0.0)
+        if not transportLinearSolver:apply_return_defect(
+                transportCorrection, transportDefect) then
+            converged = false
+            log[#log + 1] = "linear-solver-failed"
+        end
+        log[#log + 1] = string.format("(lin %d)", transportLinearSolver:step())
+        VecScaleAdd2(transportSolution, 1.0, transportSolution,
+                     -1.0, transportCorrection)
+    end
+    time = solTimeSeries:time(0) + dt  -- same rounding as prepare_step
+    print(string.format("STEP %d t=%.6g | %s, %.2f s | transport defect %s, %.2f s | %s",
+                        step, time, flowLog, flowTime, table.concat(log, " "),
+                        GetClockS() - transportStepStart,
+                        converged and "converged" or "NOT CONVERGED"))
+    if not converged then solverFailed = true; break end
+
+    -- budget uses the old solution series, so evaluate it before the push
+    TransportStepCallback(step, time, dt, transportSolution, solTimeSeries)
+
+    local oldest = solTimeSeries:oldest()
+    VecScaleAssign(oldest, 1.0, transportSolution)
+    solTimeSeries:push_discard_oldest(oldest, time)
+    timeDisc:finish_step_elem(solTimeSeries, gridLevel)
 end
 
+print(string.format("Transport time: %.3f s; total %.3f s",
+                    GetClockS() - transportStart, GetClockS() - totalStartTime))
+print(string.format("Maximum per-step mass-balance error: %.3e%%",
+                    maxBalanceErrorPercent))
+print("Positivity: " .. (positivityFailed and "FAILED" or "ok"))
 print("Transport output prefix: " .. outputName)
-print("STANDALONE_FLOW_TRANSPORT: COMPLETE")
-
+if solverFailed then print("Transport solver: FAILED") end
+if solverFailed or positivityFailed or maxBalanceErrorPercent > massBalanceTolerancePercent then
+    print("STANDALONE_FLOW_TRANSPORT: COMPLETE WITH FAILED CHECKS")
+else
+    print("STANDALONE_FLOW_TRANSPORT: COMPLETE")
+end
