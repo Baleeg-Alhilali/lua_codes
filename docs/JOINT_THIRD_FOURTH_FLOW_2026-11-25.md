@@ -21,7 +21,10 @@ ParaView on the user's request for inspection only, not as a validated result.
   −y; centres are the `Inlet_i` vertex centroids), per-nephron flux/pressure
   diagnostics, true component defects before/after the solve. The runs used a
   test copy differing only in grid/output paths (SHA-256 `2c31c53c...b19d763b5`);
-  the committed script reproduces r0 exactly.
+  the committed script reproduces r0 exactly. Restyled 2026-11-26 to the
+  code-style block layout (SHA-256 `cfb0d6aa...0bebf783`; identical r0/r1
+  printouts and iterations, see `docs/FOURTH_TRACE_FULL_FLOW_2026-11-24.md`,
+  "Code-style restyle"); terminal parameters `-grid`, `-numRefs`, `-output`.
 - Physics and solver unchanged from the fourth-trace FE script: Q = 5e-4
   mm^3/s (30 nL/min) per nephron, nu = 1 mm^2/s, K_mem = 7e-12 mm^2,
   K_inter = 1e-11 mm^2, BJS alpha 0.2, OuterWall 6.132812e5 and Outlet
