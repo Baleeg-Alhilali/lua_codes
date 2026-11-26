@@ -65,4 +65,6 @@ cells near the shell (`-interNearEdgeFactor 1 -interNearDistanceFactor 3`)
 gave 5-6x more volumes and ~9x more coarse tets below J 0.05 without
 improving the caps; `-interQuality 1.4` changed nothing. Anisotropy 1.5 alone
 raised the pyramid minimum 0.022 -> 0.101 and the tet minimum
-0.0054 -> 0.0221 at r2. Runs: `runs/fourth_shell10_caps_2026-11-26/`.
+0.0054 -> 0.0221 at r2. The test run folders were deleted after
+the results were recorded; the kept coarse and r1 meshes are in
+`runs/fourth_trace_best_mesh/` (not in git).
