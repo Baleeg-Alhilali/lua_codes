@@ -293,3 +293,29 @@ following `code/flow/flow_multiple_nephron_fv1.lua` (2026-11-20). 8 ranks.
   the FE setup and is not usable for r3+ as is. A Darcy-block preconditioner
   suited to FV1 (e.g. block/field-split with an AMG or line smoother for the
   Darcy pressure) would be needed before switching.
+
+## Code-style restyle (2026-11-26)
+
+`code/flow/nephron_flow_fourth_pad100.lua` (FE Darcy, SHA-256 `8fe02886...a9a1ff91`),
+`code/flow/nephron_flow_fourth_pad100_fv1darcy.lua` (FV1 Darcy, `b40da63c...a6d526b1`)
+and `code/flow/nephron_flow_joint_pad100.lua` (`cfb0d6aa...0bebf783`) were rewritten
+in the baleeg-simulation-code-style block layout (initiation, grouped parameters
+with units, terminal parameters, functions, discretization with per-equation
+boundary conditions, inline `solverDesc`, initial conditions, solve, output).
+Physics, solver and diagnostics are unchanged:
+
+- Terminal parameters are now `-grid`, `-numRefs`, `-output`. The test options
+  `-membranePermeability`, `-interPermeability`, `-bjsPermeability` and
+  `-outerPressure` are gone (plain parameters with the same defaults).
+- Default output: `runs/flow_fe_<grid>_<day><Mon>_<hour>h` (FV1 script:
+  `flow_fv1_...`).
+- The `flowExtraApproximationFunctions` hook was removed (only
+  `nephron_stokes_darcy_clean.lua` is loaded by the coupled driver).
+- No `assert`; the Model root check prints and exits instead.
+- Check: old (f56484d) and restyled scripts run at r0 and r1 on 8 ranks
+  (`/Users/alhilaba/UG4_promesh_ogrid/bin/ugshell`) give identical flux,
+  pressure, interface-row and true-defect printouts digit for digit and the same
+  iteration counts (FE 2/40, FV1 2/2 GMRES cycles, joint 2/36). Test outputs
+  deleted.
+- The GMG base is still SuperLU on level 0; replacing it belongs to the
+  preconditioner work.
