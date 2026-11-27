@@ -21,7 +21,7 @@ top-level PVTU files before a flow implementation can be called perfect.
 
 ## Reference configuration held fixed
 
-- mesh: `runs/third_trace_generalized3.ugx`
+- mesh: `mesh_generation/meshes/legacy_transport_meshes/third_trace_generalized3.ugx`
 - refinement: R1 in memory with the serialized projector
 - ranks: 8 for MPI probes
 - permeability: `Kmem=1e-19 m^2`, `Kinter=1e-17 m^2`, `Kbjs=1e-19 m^2`

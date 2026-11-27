@@ -26,7 +26,7 @@ assert(numRefs >= 1 and numRefs == math.floor(numRefs),
     "This validation requires an integer -numRefs >= 1")
 
 local gridName = util.GetParam(
-    "-grid", "runs/third_trace_generalized3.ugx",
+    "-grid", "mesh_generation/meshes/legacy_transport_meshes/third_trace_generalized3.ugx",
     "current coarse generalized-nephron NeuriteProjector mesh")
 local endTime = util.GetParamNumber("-endTime", 0.1)
 local dt = util.GetParamNumber("-dt", 0.1)

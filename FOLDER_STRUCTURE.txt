@@ -1,38 +1,29 @@
-MODEL FOLDER STRUCTURE
-======================
+MODEL FOLDER STRUCTURE (2026-11-27)
+===================================
 
-code/transport
-  Solute transport, membrane transport, charged-species, and diffusion models.
+code/flow        current Stokes-Darcy flow models
+code/transport   transport models (nephron diffusion check, older 2D/3D models)
+code/coupled     flow-transport coupling model
 
-code/flow
-  Fluid-only and porous-flow models, including Navier-Stokes, Darcy, velocity
-  output, and Stokes-Darcy-BJS variants.
+mesh_generation  final SWC-to-UGX pipeline, refinement and quality checks,
+                 trace repair tools
+mesh_generation/meshes/<YYYY-MM-DD>_<desc>/
+                 kept generated meshes, each with a README
 
-code/coupled
-  Models combining flow, transport, membranes, or multiple physical domains.
+Results/<YYYY-MM-DD>_<desc>/
+                 results the user chose to keep (ignored by Git)
 
-code/archive
-  Superseded baselines and explicitly experimental solver variants. These are
-  retained for comparison and should not be selected as current production
-  models without revalidation.
+docs             dated scientific notes and handoffs
+Nephron traces   SWC morphology inputs and repaired traces
+grids            compact UG4 sample grids used by the older transport models
+ug4_build_overlay  patches and sources that reproduce the UG4 build
+codex_history    notes and rollouts from earlier sessions
 
-mesh_generation
-  Current SWC-to-UGX pipelines, refinement checks, mesh-quality inspection,
-  Python preprocessing helpers, commands, and an archive of earlier variants.
-
-docs
-  Scientific notes, handoff documents, and implementation rationale.
-
-Nephron traces
-  Compact SWC morphology inputs.
-
-grids
-  Compact reusable UG4 input grids. Large generated meshes belong in runs/.
-
-runs, run, Results, results, output, tmp
-  Generated or temporary artifacts. These remain local and are ignored by Git.
+Only working code, the meshes it uses and kept results live here. Debugging
+and test output is written outside Model and deleted after the findings are
+recorded in docs/ (see AGENTS.md, "Clean workspace").
 
 Repository boundary
 -------------------
-The Model directory is the lua_codes Git repository root. The code directory
-is a normal source folder and no longer contains a nested .git directory.
+The Model directory is the lua_codes Git repository root. The folder is
+normally on branch main.

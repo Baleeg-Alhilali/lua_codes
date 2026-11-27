@@ -8,7 +8,7 @@ solvent drag, not physiological.
 
 ## Model and solver
 
-- Mesh: `Model/runs/fourth_trace_best_mesh/fourth_trace_best_mesh.ugx`
+- Mesh: `Model/mesh_generation/meshes/2026-11-26_fourth_best_mesh/fourth_trace_best_mesh.ugx`
   (sha256 prefix 4777db46794e095a; 10 um hex Inter shell of two 5 um layers;
   generated data, not in git). Inlet centre (0.338568, 0.400919, 0.163024) mm,
   +x, R = 10 um. New `-grid` option (default this path below `MODEL_ROOT`).
@@ -38,7 +38,7 @@ pushed back from ~1e-11 to ~1e-9.
 ## Root cause found on the way: thin Inter cells
 
 Diffusion+leak tests without flow showed that the transport GMG failure at r1
-on `inputs/fourth_trace_full_pad100` came from the Inter hex shell around
+on `mesh_generation/meshes/2026-11-24_fourth_pad100` came from the Inter hex shell around
 Basolateral (0.65 um vs 48 um edges, median edge ratio 0.047), not from the
 leak: pure Inter diffusion also diverged under ILU-smoothed GMG (FV1 and FE).
 On the best mesh (Inter hex min edge 3.67 um, median ratio 0.29) the same test

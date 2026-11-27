@@ -56,7 +56,7 @@ python3 mesh_generation/tools/repair_trace_clearance.py "Nephron traces/4th_trac
 # 3. repair the extended trace with frozen tails (input in mm)
 python3 mesh_generation/tools/repair_trace_clearance.py p1_outerwall_extended.swc --voxel-size 1000 \
     --frozen-head 40 --frozen-tail 40 --clearance 55 -o extended_repaired.swc --report ext.json
-# 4. final mesh r0-r2 (see inputs/fourth_trace_full_pad100/README.md)
+# 4. final mesh r0-r2 (see mesh_generation/meshes/2026-11-24_fourth_pad100/README.md)
 # evaluate / plot
 python3 mesh_generation/tools/audit_trace.py extended_repaired.swc --voxel-size 1
 python3 mesh_generation/tools/plot_trace_repair.py "Nephron traces/4th_trace_167.swc" coil.swc -o cmp.png

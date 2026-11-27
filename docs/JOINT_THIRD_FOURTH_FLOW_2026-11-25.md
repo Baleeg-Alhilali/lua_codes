@@ -7,7 +7,7 @@ ParaView on the user's request for inspection only, not as a validated result.
 
 ## Inputs
 
-- Mesh: `inputs/third_fourth_joint_pad100/third_fourth_joint_pad100.ugx`
+- Mesh: `mesh_generation/meshes/2026-11-25_third_fourth_joint/third_fourth_joint_pad100.ugx`
   (SHA-256 `8afc8636...d29b9e5`, from mesh-generation commit `7407450`,
   copied unchanged into this branch). Coarse projector-backed mesh, refined
   in memory; third trace = nephron 1, fourth trace = nephron 2, per-nephron

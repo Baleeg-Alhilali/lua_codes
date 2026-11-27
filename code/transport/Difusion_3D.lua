@@ -22,7 +22,7 @@ total_start_time = GetClockS()
 --------------------------------------------------------------------------------
 
 dim = 3
-gridName = "ProMeshFiles/runs/old_files/iso_2.ugx"
+gridName = "mesh_generation/meshes/legacy_transport_meshes/iso_2.ugx"
 
 numRefs = 2
 numPreRefs = 0

@@ -6,17 +6,15 @@ files used for the nephron simulations in UG4. The local repository root is:
 `/Users/alhilaba/Documents/Promesh_swc/Model`
 
 The repository is intentionally separated from generated meshes and numerical
-results. Large or reproducible outputs remain on the workstation under
-`runs/`, `Results/`, `results/`, and `output/`; those directories are ignored
-by Git.
+results. Kept results are in `Results/<YYYY-MM-DD>_<desc>/` (ignored by Git); kept
+meshes are in `mesh_generation/meshes/<YYYY-MM-DD>_<desc>/`.
 
 Primary source areas:
 
 - `code/transport/` — solute transport and electro-diffusion models.
 - `code/flow/` — Navier–Stokes, Darcy, and velocity-field models.
 - `code/coupled/` — coupled flow/transport and multicomponent models.
-- `code/archive/` — older or experimental solver variants retained for study.
-- `mesh_generation/` — active mesh-generation pipelines and helper tools.
+- `mesh_generation/` — the final mesh pipeline, its tools and `meshes/`.
 - `docs/` — experiment notes, handoffs, and project documentation.
 - `Nephron traces/` and `grids/` — compact source inputs.
 

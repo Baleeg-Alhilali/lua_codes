@@ -6,6 +6,52 @@ into current design rules. Read the relevant source and recent validation
 evidence before changing a model. A dated report describes its tested snapshot,
 not necessarily the present working tree.
 
+## Clean workspace (user rule, 2026-11-27)
+
+`/Users/alhilaba/Documents/Promesh_swc/Model` is the folder where the user
+reads and runs the current code. It must contain only working code, the
+meshes and inputs that code uses, and results the user chose to keep. These
+rules take precedence over older notes in this file and in `README.md` or
+`FOLDER_STRUCTURE.txt` that describe archives or scratch folders inside it.
+
+1. **Keep the folder structure.** The top-level folders (`code/` with its
+   `flow`, `transport` and `coupled` subfolders, `mesh_generation/`,
+   `Results/`, `docs/`, `Nephron traces/`, `ug4_build_overlay/`) keep their
+   names and nesting. Do not put results, logs, test meshes, notebooks or
+   debugging files at the top level or inside the code folders.
+2. **Mesh generation.** `mesh_generation/` holds only the files the final
+   pipeline uses: the single- and multi-nephron generators, refinement and
+   quality checks, the Python helpers they call (smoothing, terminal
+   extension, validation), the trace repair/audit tools and `COMMANDS.txt` /
+   `README.txt`. Generated meshes the user keeps live in
+   `mesh_generation/meshes/<YYYY-MM-DD>_<short_description>/`, each with a
+   short README (source trace, command, validation level). Unused generator
+   variants, sweeps and probe scripts are deleted, not archived.
+3. **Code folders.** `code/flow`, `code/transport` and `code/coupled` hold
+   only working scripts and the post-processing they need. Any script written
+   for debugging, a one-off test, a probe or a superseded variant (for
+   example `debug_*`, `*_test*`, `analyze_*`, `*_backup`, `*_before_*`,
+   numbered or `_v2` copies) is deleted once its findings are written into a
+   dated note in `docs/`. Git history is the archive; do not keep `archive/`
+   copies or rollback folders inside `Model`.
+4. **Results.** `Results/` holds only results the user asked to keep, in
+   `Results/<YYYY-MM-DD>_<short_description>/`. Results produced while
+   debugging or testing are deleted after the numbers are recorded in the
+   dated note. Run tests and debugging in the session scratchpad or another
+   folder outside `Model`, never in `Results/`, `runs/`, `tmp/` or the code
+   folders.
+5. **Approved code reaches this folder.** Work done in a git worktree, on
+   another branch, or outside git (for example the UG4 tree) is not finished
+   until the user says the code is good. Then make the approved files
+   visible here: merge the branch into the branch checked out in this folder
+   (normally `main`, after `development`), or, for files that are not part of
+   this repository or branch, copy them into the matching folder here. Tell
+   the user exactly which files arrived where. Never leave the only approved
+   copy in a worktree, scratchpad or backup folder.
+6. **Ask before deleting.** Deleting untracked results or meshes cannot be
+   undone. List what will be deleted (paths and sizes) and get the user's
+   yes first; tracked files can be recovered from git history.
+
 ## Orientation and evidence
 
 - The repository root is `Model`. `code/transport`, `code/flow`, and

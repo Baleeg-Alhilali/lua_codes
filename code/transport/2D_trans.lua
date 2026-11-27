@@ -19,7 +19,7 @@ total_start_time = GetClockS()
 
 dim = 2
 gridS = "2D_trans2"
-gridName = "ProMeshFiles/runs/" .. gridS .. ".ugx"
+gridName = "mesh_generation/meshes/legacy_transport_meshes/" .. gridS .. ".ugx"
 
 
 numRefs = util.GetParamNumber("-numRefs", 4)

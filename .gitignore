@@ -32,3 +32,6 @@ __pycache__/
 *.swp
 *.swo
 *~
+
+# Flat refined inspection meshes (the solver refines the coarse UGX in memory)
+/mesh_generation/meshes/**/*_refined_*.ugx

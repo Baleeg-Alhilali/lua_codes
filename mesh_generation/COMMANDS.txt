@@ -6,7 +6,7 @@ All commands below are intended to be run from:
   cd /Users/alhilaba/Documents/Promesh_swc/Model/mesh_generation
 
 The scripts resolve helper files from this folder, read traces from
-../Nephron traces, and normally write generated meshes to ../runs.
+../Nephron traces, and write kept meshes to meshes/<YYYY-MM-DD>_<desc>/.
 
 
 1. Standard single-nephron mesh
@@ -18,7 +18,7 @@ The scripts resolve helper files from this folder, read traces from
     -radius 1 \
     -membraneThickness 0.2 \
     -numRefs 1 \
-    -out "../runs/third_trace_standard.ugx"
+    -out "meshes/<YYYY-MM-DD>_<name>/third_trace_standard.ugx"
 
 What it does:
   - Smooths the input SWC.
@@ -45,7 +45,7 @@ What it does:
     -paddingZ 400 \
     -terminalPaddingFactor 0 \
     -numRefs 2 \
-    -out "../runs/third_trace_radius15_membrane10.ugx"
+    -out "meshes/<YYYY-MM-DD>_<name>/third_trace_radius15_membrane10.ugx"
 
 What it does:
   - Builds the validated 15 um lumen-radius and 10 um membrane case.
@@ -69,7 +69,7 @@ What it does:
     -padding 300 \
     -terminalPaddingFactor 0 \
     -numRefs 0 \
-    -out "../runs/straight_nephron_no_bend.ugx"
+    -out "meshes/<YYYY-MM-DD>_<name>/straight_nephron_no_bend.ugx"
 
 What it does:
   - Keeps every smoothed SWC centerline coordinate unchanged.
@@ -97,7 +97,7 @@ What it does:
     -terminalPaddingFactor 0 \
     -interMesh prism \
     -numRefs 2 \
-    -out "../runs/straight_nephron_prism_inter.ugx"
+    -out "meshes/<YYYY-MM-DD>_<name>/straight_nephron_prism_inter.ugx"
 
 What it does:
   - Sweeps a graded triangular square-minus-circle cross-section along the
@@ -163,7 +163,7 @@ What it does:
     -radius 1 \
     -membraneThickness 0.2 \
     -numRefs 1 \
-    -out "../runs/two_nephrons_shared_inter.ugx"
+    -out "meshes/<YYYY-MM-DD>_<name>/two_nephrons_shared_inter.ugx"
 
 What it does:
   - Smooths and combines all consecutively numbered -swc1, -swc2, ... inputs.
@@ -176,9 +176,9 @@ What it does:
 
   /Users/alhilaba/UG4_promesh_ogrid/bin/ugshell \
     -ex refine_neurite_projector.lua -- \
-    -grid "../runs/third_trace_standard.ugx" \
+    -grid "meshes/<YYYY-MM-DD>_<name>/third_trace_standard.ugx" \
     -refs 2 \
-    -out "../runs/third_trace_standard_refined.ugx"
+    -out "meshes/<YYYY-MM-DD>_<name>/third_trace_standard_refined.ugx"
 
 What it does:
   - Loads an existing UGX containing its NeuriteProjector and npSurfParams.
@@ -188,25 +188,13 @@ What it does:
     validates the saved result, and aborts if any structural check fails.
 
 
-7. Check the ProMesh GUI-style refinement path
------------------------------------------------
 
-  /Users/alhilaba/UG4_promesh_ogrid/bin/ugshell \
-    -ex promesh_refine_check.lua -- \
-    -grid "../runs/third_trace_standard.ugx" \
-    -out "../runs/third_trace_promesh_refine_check.ugx"
-
-What it does:
-  - Reproduces ProMesh LoadMesh, SelectAll, Refine, and SaveMesh.
-  - Confirms that serialized projector metadata works through the GUI-style path.
-
-
-8. Inspect mesh quality
+7. Inspect mesh quality
 -----------------------
 
   /Users/alhilaba/UG4_promesh_ogrid/bin/ugshell \
     -ex Mesh_quality.lua -- \
-    -grid "../runs/third_trace_standard.ugx" \
+    -grid "meshes/<YYYY-MM-DD>_<name>/third_trace_standard.ugx" \
     -bins 20 \
     -sliverThreshold 0.01 \
     -anisotropyThreshold 0.1 \
@@ -226,7 +214,9 @@ Important notes
     conformity across Lumen, Membrane, Inter, and OuterWall.
   - numRefs writes flat inspection meshes. The flow solver builds its multigrid
     hierarchy in memory from the coarse projector-backed UGX.
-  - Generated files should go in ../runs, not in mesh_generation.
+  - Kept meshes go in meshes/<YYYY-MM-DD>_<short_description>/ with a README
+    (source trace, command, validation level). Test meshes go to a scratch
+    folder outside Model and are deleted after the check.
   - Validation is enabled by default in both generation and standalone
     refinement. Do not use -validate 0 for production meshes. It exists only
     for diagnostic fixtures with deliberately different boundary subsets;

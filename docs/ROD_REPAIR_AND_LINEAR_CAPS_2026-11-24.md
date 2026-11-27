@@ -79,7 +79,7 @@ extension of both traces to the OuterWall, and a joint frozen-tail repair.
 
 ## 2. r1 -> r2 tetrahedron decline: cause and fix
 
-Full fourth trace (`inputs/fourth_trace_full_pad100/fourth_trace_full_pad100.ugx`),
+Full fourth trace (`mesh_generation/meshes/2026-11-24_fourth_pad100/fourth_trace_full_pad100.ugx`),
 checker mode 2: tet 0.0140 (r1) -> 0.00126 (r2); hex/prism/pyramid stable.
 
 ### Diagnosis
@@ -146,7 +146,7 @@ Outputs (not in git): `runs/rod_repair_2026-11-24/lc2/` (third_b32_lc,
 third_full/), earlier variants in `runs/rod_repair_2026-11-24/`. The folder
 `runs/rod_repair_2026-11-24/lc/` is an invalid run (zsh passed the mesh
 flags as one word; trace scaled x24) and can be deleted.
-Coarse full-third mesh for solvers: `inputs/third_trace_full_pad100/`.
+Coarse full-third mesh for solvers: `mesh_generation/meshes/2026-11-25_third_pad100/`.
 
 ## 4. Known limits / next steps
 
@@ -233,7 +233,7 @@ The worst tetrahedron is a linear far-field TetGen cell at the inlet wall that
 refines without loss after r1. Pyramids lose ~27 % r1 -> r2 near a terminal
 (axial < 0.01, where the shell thickness ramps); the third-trace meshes show
 the same terminal-region trend (7-11 %). This is the main open quality item
-before deeper refinement. Mesh: `inputs/third_fourth_joint_pad100/`.
+before deeper refinement. Mesh: `mesh_generation/meshes/2026-11-25_third_fourth_joint/`.
 
 Not done: generator r2 flat files for the joint mesh (r2 checked in memory),
 flow/transport solves, and the 32 vs 35 um choice for the single-trace meshes
@@ -245,10 +245,10 @@ The hex cell radial thickness is `-prismInterThickness / layers`, where the
 layer count is clamp(ceil(`-interLayersPerSurfaceEdge` x thickness / surface
 edge), `-interMinLayers`, `-interMaxLayers`); with the 3 um shell the minimum
 of 4 layers gave 0.75 um cells. Lua and C++ both require >= 2 layers.
-Scan (2 layers, same trace as `inputs/fourth_trace_full_pad100`): 3 and 4 um
+Scan (2 layers, same trace as `mesh_generation/meshes/2026-11-24_fourth_pad100`): 3 and 4 um
 pass r0-r2 with 0 inverted cells; 4.5 um inverts 2 cap pyramids at r2; 5-7 um
 segfault in TetGen. Meshes, commands and quality table:
-`inputs/fourth_trace_thick_hex/README.md`. The 2 x 2 um mesh is the thickest
+`mesh_generation/meshes/2026-11-25_fourth_thick_hex/README.md`. The 2 x 2 um mesh is the thickest
 valid one but its pyramid minimum drops 0.081 -> 0.020 r1 -> r2; the 2 x 1.5 um
 mesh is stable. Geometry pass only; no solves.
 
@@ -260,7 +260,7 @@ TetGen far field is also much worse than with hex: 1,715-3,825 tetrahedra
 below J 0.05 (minimum 1e-6 to 2e-3) versus 23-34 with hex. The prism path has
 no outward caps (2,520 triangular transition faces) and none of the hex
 path's bend/portal thickness limits. Prisms do not fix the thin-cell problem;
-the 2-layer hex meshes in `inputs/fourth_trace_thick_hex/` remain the option.
+the 2-layer hex meshes in `mesh_generation/meshes/2026-11-25_fourth_thick_hex/` remain the option.
 
 ## 8. Fourth trace with a 10 um, two-layer hex shell (2026-11-26)
 
@@ -270,11 +270,11 @@ clearance >= ~70 um. The fourth trace was re-repaired at R 55 / clearance 75
 (default homotopy reached R 51 only; `--ramp-steps 24 --lbfgs-iters 1000
 --w-length 1e5` passed). Built with anisotropy 2 so that Inter/Membrane hex
 aspect ratios stay below 10 (max 8.2 at r2). Validation PASS r0-r2, 0 inverted.
-Details and tables: `inputs/fourth_trace_shell10/README.md`.
+Details and tables: `mesh_generation/meshes/2026-11-26_fourth_shell10/README.md`.
 `rod_repair_workflow.sh` now takes `INTER_OPTS`; new tool
 `mesh_generation/tools/hex_aspect_ratio.py`. Geometry pass only.
 Cap treatment follow-up: anisotropy 1.5 (squarer outer cap bases, 174
 stations) raised the r2 pyramid minimum 0.022 -> 0.101 and the tet minimum
 0.0054 -> 0.0221 with fewer volumes; finer TetGen near-field sizing made the
 mesh 5-6x larger and the tets worse, and `-interQuality 1.4` had no effect.
-Recommended mesh: `inputs/fourth_trace_shell10/fourth_shell10_a15.ugx`.
+Recommended mesh: `mesh_generation/meshes/2026-11-26_fourth_shell10/fourth_shell10_a15.ugx`.

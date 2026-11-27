@@ -84,14 +84,16 @@ maximumInletVelocity = 2.0 * meanInletVelocity                                --
 ------------------------------------------------------------------------------------------
 
 gridName = util.GetParam("-grid",
-    MODEL_ROOT .. "/inputs/fourth_trace_full_pad100/fourth_trace_full_pad100.ugx",
+    MODEL_ROOT .. "/mesh_generation/meshes/2026-11-24_fourth_pad100/fourth_trace_full_pad100.ugx",
     "grid file")
 numRefs = util.GetParamNumber("-numRefs", 2, "number of refinements")
 
 gridBaseName = gridName:match("([^/\\]+)%.%w+$")
 outputName = util.GetParam("-output",
-    MODEL_ROOT .. "/runs/flow_fv1_" .. gridBaseName .. "_" .. os.date("%d%b_%Hh"),
-    "VTK output prefix")
+    MODEL_ROOT .. "/Results/" .. os.date("%Y-%m-%d") .. "_flow_fv1_" .. gridBaseName
+        .. "/" .. gridBaseName .. "_" .. os.date("%d%b_%Hh"),
+    "VTK output prefix (kept results: Results/<date>_<desc>/)")
+os.execute("mkdir -p \"" .. outputName:match("^(.*)/[^/]*$") .. "\"")
 
 ------------------------------------------------------------------------------------------
 -- Functions

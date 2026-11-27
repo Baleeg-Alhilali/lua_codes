@@ -49,10 +49,10 @@ dim = 3
 
 numRefs = util.GetParamNumber("-numRefs", 0, "number of refinements")
 gridName = util.GetParam("-grid", MODEL_ROOT ..
-    "/runs/fourth_trace_best_mesh/fourth_trace_best_mesh.ugx",
-    "coarse projector-backed UGX (generated meshes live in Model/runs)")
+    "/mesh_generation/meshes/2026-11-26_fourth_best_mesh/fourth_trace_best_mesh.ugx",
+    "coarse projector-backed UGX (meshes live in Model/mesh_generation/meshes)")
 outputName = util.GetParam(
-    "-output", MODEL_ROOT .. "/Results_final/leak_transport_r" .. numRefs,
+    "-output", MODEL_ROOT .. "/Results/" .. os.date("%Y-%m-%d") .. "_leak_transport/leak_transport_r" .. numRefs,
     "VTK output prefix")
 
 -- Transient transport run control

@@ -30,7 +30,7 @@ local MESH_LENGTH_SCALE = 1e-3
 cfg.swc = util.GetParam("-swc", MODEL_ROOT .. "/Nephron traces/3rd_trace_243_third.swc")
 local input_name = cfg.swc:match("([^/]+)$") or cfg.swc
 local input_stem = input_name:gsub("%.[^%.]+$", "")
-cfg.out = util.GetParam("-out", MODEL_ROOT .. "/runs/" .. input_stem .. ".ugx")
+cfg.out = util.GetParam("-out", MODEL_ROOT .. "/mesh_generation/meshes/" .. os.date("%Y-%m-%d") .. "_" .. input_stem .. "/" .. input_stem .. ".ugx")
 cfg.smoother = util.GetParam("-smoother",
 	script_dir .. "/quadratic_interpolate_swc.py")
 cfg.readySwc = util.GetParam("-readySwc", "")

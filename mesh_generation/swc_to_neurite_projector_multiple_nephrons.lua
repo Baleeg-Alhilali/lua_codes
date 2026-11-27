@@ -87,7 +87,7 @@ local cfg = {}
 -- Input SWC coordinates and all CLI lengths are in um; UGX/projector
 -- coordinates are in mm. Smoothing is done before this conversion.
 local MESH_LENGTH_SCALE = 1e-3
-cfg.out = util.GetParam("-out", MODEL_ROOT .. "/runs/multiple_nephrons.ugx")
+cfg.out = util.GetParam("-out", MODEL_ROOT .. "/mesh_generation/meshes/" .. os.date("%Y-%m-%d") .. "_multiple_nephrons/multiple_nephrons.ugx")
 cfg.smoother = util.GetParam("-smoother",
 	script_dir .. "/quadratic_interpolate_swc.py")
 -- Copy every -swcN trace verbatim instead of smoothing it (use for traces

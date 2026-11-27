@@ -30,7 +30,7 @@ assert(refinementLevel >= 0 and refinementLevel == math.floor(refinementLevel),
 -- Always start from the original coarse mesh. Its serialized
 -- NeuriteProjectors generate the curved geometry on every new level.
 local gridName = util.GetParam(
-    "-grid", "runs/third_trace_mm_transport.ugx",
+    "-grid", "mesh_generation/meshes/legacy_transport_meshes/third_trace_mm_transport.ugx",
     "coarse transport projector UGX mesh")
 local numPreRefs = 0
 

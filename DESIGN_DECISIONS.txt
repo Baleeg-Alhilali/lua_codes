@@ -17,7 +17,7 @@ ORGANIZATION AND PATH DECISIONS
 
 4. Mesh generation is separate from solver code.
    It has different helpers, commands, inputs, and validation steps. Active
-   scripts remain directly under mesh_generation; old variants are archived.
+   scripts remain directly under mesh_generation; old variants are deleted (git history keeps them).
 
 5. Large outputs are not normal Git objects.
    Mesh refinements and ParaView outputs can be hundreds of MB or many GB.
