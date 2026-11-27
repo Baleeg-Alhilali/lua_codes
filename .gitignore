@@ -35,3 +35,6 @@ __pycache__/
 
 # Flat refined inspection meshes (the solver refines the coarse UGX in memory)
 /mesh_generation/meshes/**/*_refined_*.ugx
+
+# Claude Code session worktrees
+.claude/
