@@ -71,7 +71,7 @@ firstDistributionLevel                = 0        -- [-]
 interfaceConservationTolerancePercent = 1.0e-1   -- [%]  output gate
 
 -- Mesh-dependent parameters (fourth_trace_full_pad100.ugx, inlet on the x-min wall)
-inletCenter    = {0.360781065, 0.393057145, 0.162855950}  -- [mm]
+inletCenter    = {0.338568, 0.400919, 0.163024}  -- [mm]
 inletDirection = {1.0, 0.0, 0.0}                          -- [-]
 inletRadius    = 1.0e-2                                   -- [mm]
 
@@ -84,7 +84,7 @@ maximumInletVelocity = 2.0 * meanInletVelocity                                --
 ------------------------------------------------------------------------------------------
 
 gridName = util.GetParam("-grid",
-    MODEL_ROOT .. "/mesh_generation/meshes/2026-11-24_fourth_pad100/fourth_trace_full_pad100.ugx",
+   "/Users/alhilaba/Documents/Promesh_swc/Model/mesh_generation/meshes/2026-11-26_fourth_best_mesh/fourth_trace_best_mesh.ugx",
     "grid file")
 numRefs = util.GetParamNumber("-numRefs", 2, "number of refinements")
 
@@ -331,7 +331,7 @@ solverDesc = {
     convCheck = {
         type       = "standard",
         iterations = 400,               -- maximum number of iterations
-        absolute   = 1.0e-14,           -- absolute defect to be reached
+        absolute   = 1.0e-9,           -- absolute defect to be reached
         reduction  = 1.0e-8,            -- defect reduction to be reached
         verbose    = true
     }

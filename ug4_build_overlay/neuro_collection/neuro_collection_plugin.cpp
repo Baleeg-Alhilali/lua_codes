@@ -60,6 +60,7 @@
 #include "user_flux_bnd_fv1.h"
 #include "pressure_continuity_fv1.h"
 #include "pressure_trace_constraint.h"
+#include "vertex_grid_function_data.h"
 #include "membrane_transporters/membrane_transporter_interface.h"
 #include "membrane_transporters/hh.h"
 #include "membrane_transporters/hh_charges.h"
@@ -304,6 +305,21 @@ static void DomainAlgebra(Registry& reg, string grp)
 				"", "file prefix", "Write per-node rows of the next captured defect")
 			.set_construct_as_smart_pointer(true);
 		reg.add_class_to_group(name, "PressureTraceConstraint", tag);
+	}
+
+	// Nodal grid-function value looked up by exact vertex position
+	// (e.g. a nodal flux density for MembraneTransportFV1), 2026-11-27.
+	{
+		typedef VertexGridFunctionNumberData<TGridFunction> T;
+		typedef CplUserData<number, TDomain::dim> TBase;
+		string name = string("VertexGridFunctionNumberData").append(suffix);
+		reg.add_class_<T, TBase>(name, grp)
+			.template add_constructor<void (*)(SmartPtr<TGridFunction>, const char*)>(
+				"GridFunction#Component")
+			.add_method("evaluate", static_cast<number (T::*)(const MathVector<TDomain::dim>&) const>(&T::evaluate))
+			.add_method("num_vertices", &T::num_vertices)
+			.set_construct_as_smart_pointer(true);
+		reg.add_class_to_group(name, "VertexGridFunctionNumberData", tag);
 	}
 
 	// extra commands for this plugin

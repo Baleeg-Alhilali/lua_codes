@@ -11,7 +11,11 @@
 --
 --  Transport (transient, backward Euler):
 --    Na+, K+, Cl-, urea advection--diffusion in Lumen, Membrane, Inter
---    Apical and Basolateral: passive leaks only (no pump, no solvent drag)
+--    Apical and Basolateral: passive leaks (GHK for Na and Cl at fixed
+--    potentials), basolateral Na/K pump, solvent drag (1 - sigma) J_v c_up
+--    with the conservative membrane water flux J_v
+--    Reabsorption bookkeeping [pmol] printed and written to
+--    <output>_reabsorption.csv
 --
 --  Coupling: flow and concentrations share one approximation space so that
 --  transport convects with the same FV1 face fluxes the flow conserved
@@ -56,7 +60,7 @@ outputName = util.GetParam(
     "VTK output prefix")
 
 -- Transient transport run control
-endTime = util.GetParamNumber("-endTime", 20.0)
+endTime = util.GetParamNumber("-endTime", 30.0)
 dt = util.GetParamNumber("-dt", 0.1)
 outputEverySteps = util.GetParamNumber("-outputEverySteps", 10)
 
@@ -104,30 +108,49 @@ massBalanceTolerancePercent = 1.0e-6      -- per-step discrete balance gate
 -- basolateral Na/K pump; K leaks only basolaterally (plus the pump); Cl and
 -- urea leak across both membranes.  Weinstein values where nonzero; the
 -- 2026-11-22 project assumptions are marked "project".
+-- Reflection coefficients sigma [0,1]: the solvent-drag flux across a
+-- membrane is (1 - sigma) J_v c_upstream (sigma = 1: no drag, the solute is
+-- left behind when water is reabsorbed; sigma = 0: it moves with the water).
 soluteParameters = {
     na = {
         label = "Na", diffusion = 1.33e-3, inlet = 140.0,
-        cellInitial = 19.6, interInitial = 140.3,
+        valency = 1, ghk = false,            -- [-] GHK leaks
+        cellInitial = 19.6, interInitial = 0,
+        outerWall = 0,                    -- [mM] OuterWall bath
         apicalPermeability = 1.00e-3,       -- project
         basolateralPermeability = 0.0,      -- pump pathway only
+        reflectionApical = 0.0,             -- [-] solvent drag, test value
+        reflectionBasolateral = 0.0,        -- [-] solvent drag, test value
     },
     k = {
         label = "K", diffusion = 1.96e-3, inlet = 4.9,
-        cellInitial = 138.1, interInitial = 4.66,
+        valency = 1, ghk = false,           -- [-] linear leak
+        cellInitial = 2.0, interInitial = 4.66,
+        outerWall = 4.66,                   -- [mM] OuterWall bath
         apicalPermeability = 0.0,           -- no apical K leak
         basolateralPermeability = 7.40e-4,
+        reflectionApical = 0.0,             -- [-] solvent drag, test value
+        reflectionBasolateral = 0.0,        -- [-] solvent drag, test value
     },
     cl = {
         label = "Cl", diffusion = 2.03e-3, inlet = 113.2,
-        cellInitial = 16.3, interInitial = 112.0,
+        valency = -1, ghk = false,           -- [-] GHK leaks
+        cellInitial = 50.0, interInitial = 0,
+        outerWall = 0.0,                    -- [mM] OuterWall bath
         apicalPermeability = 8.00e-4,       -- project
         basolateralPermeability = 8.00e-4,  -- project
+        reflectionApical = 0.0,             -- [-] solvent drag, test value
+        reflectionBasolateral = 0.0,        -- [-] solvent drag, test value
     },
     urea = {
         label = "Urea", diffusion = 1.67e-3, inlet = 5.0,
-        cellInitial = 4.96, interInitial = 4.91,
+        valency = 0, ghk = false,           -- [-] linear leak
+        cellInitial = 1.0, interInitial = 0,
+        outerWall = 0.0,                    -- [mM] OuterWall bath
         apicalPermeability = 3.78e-4,
         basolateralPermeability = 3.70e-4,
+        reflectionApical = 0.0,             -- [-] solvent drag, test value
+        reflectionBasolateral = 0.0,        -- [-] solvent drag, test value
     },
 }
 soluteOrder = {"na", "k", "cl", "urea"}
@@ -139,6 +162,13 @@ pumpEnabled = true
 pumpMaxCycleFlux = 0.036                  -- [mM mm/s]
 pumpKNa = 3.516                           -- [mM]
 pumpKK = 0.8584                           -- [mM]
+
+-- Electrical potentials for the GHK leaks (fixed, no potential equation).
+-- Cell (Membrane compartment) at -70 mV relative to Lumen and Inter.
+faradayConstant = 96485.0                 -- [C/mol]
+gasConstant = 8.31451                     -- [J/(mol K)]
+temperature = 310.15                      -- [K]
+compartmentPotential = {lumen = 0.0, membrane = -0.050, inter = 0.0}  -- [V]
 compartmentOrder = {"lumen", "membrane", "inter"}
 
 assert(endTime > 0.0, "-endTime must be positive")
@@ -186,9 +216,9 @@ print(string.format("Transport: 0 to %.6g s, dt=%.6g s, output every %d steps",
 for _, soluteKey in ipairs(soluteOrder) do
     local p = soluteParameters[soluteKey]
     print(string.format(
-        "%s: inlet=%.6g cell0=%.6g inter0=%.6g mM; D=%.6g mm^2/s; " ..
-        "Papical=%.6g Pbaso=%.6g mm/s",
-        p.label, p.inlet, p.cellInitial, p.interInitial, p.diffusion,
+        "%s: inlet=%.6g cell0=%.6g inter0=%.6g outerWall=%.6g mM; " ..
+        "D=%.6g mm^2/s; Papical=%.6g Pbaso=%.6g mm/s",
+        p.label, p.inlet, p.cellInitial, p.interInitial, p.outerWall, p.diffusion,
         p.apicalPermeability, p.basolateralPermeability))
 end
 
@@ -405,12 +435,17 @@ end
 -- Galerkin coarse Stokes--Darcy operator does not reach 1e-10 in 2000
 -- iterations and the steady flow solve aborts; accepting the inexact coarse
 -- iterate instead makes the outer BiCGStab diverge.
+flowCoarseSolverChoice = "superlu"
 util.solver.defaults.approxSpace = approxSpace
 if darcyScheme == "FE" then flowSolver = BiCGStab() else flowSolver = GMRES(100) end
 flowSolver:set_preconditioner(util.solver.CreatePreconditioner({
     type = "gmg", approxSpace = approxSpace, discretization = domainDisc,
     rap = true, smoother = uzawa, cycle = "V", preSmooth = 2, postSmooth = 2,
-    baseSolver = IterativeCoarseSolver(), baseLevel = 0,
+    -- TEMPORARY (user, 2026-11-28): SuperLU on level 0 only, as the flow-only
+    -- scripts, until an iterative coarse solve works at r2 (["superlu",
+    -- IterativeCoarseSolver()]).  The transport block stays fully iterative.
+    baseSolver = flowCoarseSolverChoice, baseLevel = 0,
+    gatheredBaseSolverIfAmbiguous = true,
     transfer = {type = "std", restrictionDamp = 1.0, prolongationDamp = 1.0,
                 enableP1LagrangeOptimization = true}
 }))
@@ -596,6 +631,153 @@ HoldFields(flowHold, {"u", "v", "w"}, velocitySubsets)
 HoldFields(flowHold, {"p_stokes"}, stokesPressureSubsets)
 HoldFields(flowHold, {"p_darcy_scaled"}, allSubsets)
 
+-- Passive leak source -> target.  Linear: J = P (c_s - c_t).  GHK at the
+-- fixed potentials (v = phi_t - phi_s, k = zF/RT):
+--   J = -P k v (c_s - c_t e^{kv}) / (1 - e^{kv}) = A (c_s - e^{kv} c_t),
+-- which is UG4's Leak GHK formula; with fixed v it is linear in c, so a
+-- Leak with permeability A and target input scaled by e^{kv} is exact.
+function MakeLeak(sourceField, targetField, permeability, p,
+                  sourceCompartment, targetCompartment)
+    local leak = Leak({sourceField, targetField})
+    local kv = p.valency * faradayConstant / (gasConstant * temperature) *
+        (compartmentPotential[targetCompartment] -
+         compartmentPotential[sourceCompartment])
+    if not p.ghk or math.abs(kv) < 1.0e-12 then
+        leak:set_permeability(permeability)
+    else
+        local ghkPermeability = -permeability * kv / (1.0 - math.exp(kv))
+        leak:set_permeability(ghkPermeability)
+        leak:set_scale_input(1, math.exp(kv))
+        print(string.format("GHK leak %s %s->%s: kv=%.4f, A=%.6g mm/s " ..
+            "(P=%.6g), target scale e^kv=%.6g", p.label, sourceCompartment,
+            targetCompartment, kv, ghkPermeability, permeability, math.exp(kv)))
+    end
+    return leak
+end
+
+-- Solvent drag: J_s = (1 - sigma) J_v c_up across Apical (lumen -> cell) and
+-- Basolateral (cell -> Inter).  J_v [mm/s] per node is the consistent FE
+-- boundary flux of the Membrane Darcy block (its Apical sum is the assembled
+-- interface water flux) divided by the node's boundary area; c_up is the
+-- upstream concentration (positivity preserving).  Forward (J_v > 0) and
+-- backward (J_v < 0) parts are separate transporters.  J_v is a nodal field
+-- stored in the p_darcy_scaled component of auxiliary grid functions and
+-- read at the vertex (MembraneTransportFV1 evaluates its density at the
+-- boundary-face corner = node) by VertexGridFunctionNumberData
+-- (neuro_collection, 2026-11-27): an exact vertex-position lookup.  UG4's
+-- GlobalGridFunctionNumberData is unusable here: its edge search tests only
+-- x (drag 20 % low) and its volume search fails at curved hex corners.
+waterFluxEq = DarcyEquation("p_darcy_scaled", "Membrane")
+waterFluxEq:set_mass_scale(0.0)
+waterFluxEq:set_diffusion(scaledMembraneMobility)
+waterFluxDisc = DomainDiscretization(approxSpace)
+waterFluxDisc:add(waterFluxEq)
+
+function NodeIndicator(field, subsets)
+    local g = solution:clone()
+    g:set(0.0)
+    Interpolate(1.0, g, field, subsets)
+    g:set_consistent_storage_type()
+    return g
+end
+
+-- Boundary area per node [mm^2] (box area of the FV1 boundary faces).
+function NodalBoundaryArea(boundary, indicator)
+    local neumann = NeumannBoundary("p_darcy_scaled", "fv1")
+    neumann:add(1.0, boundary, "Membrane")
+    local disc = DomainDiscretization(approxSpace)
+    disc:add(neumann)
+    local area = solution:clone()
+    area:set(0.0)
+    disc:assemble_defect(area, solution)
+    if VecProd(area, indicator) < 0.0 then VecScaleAssign(area, -1.0, area) end
+    local total = VecProd(area, indicator)
+    area:enforce_consistent_type()
+    return area, total
+end
+
+waterIndicator = {
+    -- the lumen rim (TripleJunction) nodes carry part of the Apical water
+    apical = NodeIndicator("p_darcy_scaled", "Apical,TripleJunction"),
+    basolateral = NodeIndicator("p_darcy_scaled", "Basolateral"),
+}
+waterArea, waterAreaTotal = {}, {}
+for _, side in ipairs({"apical", "basolateral"}) do
+    waterArea[side], waterAreaTotal[side] = NodalBoundaryArea(
+        side == "apical" and "Apical" or "Basolateral", waterIndicator[side])
+end
+waterOnes = solution:clone()
+waterOnes:set(1.0)
+waterOnes:set_consistent_storage_type()
+waterWork = {solution:clone(), solution:clone(), solution:clone()}
+-- forward / backward flux density fields [mm/s] and their face data
+waterFluxDensity = {}
+waterFluxData = {}
+for _, side in ipairs({"apical", "basolateral"}) do
+    waterFluxDensity[side] = {forward = solution:clone(), backward = solution:clone()}
+    waterFluxData[side] = {}
+    for _, direction in ipairs({"forward", "backward"}) do
+        waterFluxDensity[side][direction]:set(0.0)
+        waterFluxData[side][direction] = VertexGridFunctionNumberData(
+            waterFluxDensity[side][direction], "p_darcy_scaled")
+    end
+end
+waterFluxResidual = solution:clone()
+waterFlux = {}   -- [mm^3/s] apical: lumen -> cell, basolateral: cell -> Inter
+
+function UpdateWaterFlux(currentSolution)
+    local R = waterFluxResidual
+    R:set(0.0)
+    -- R_i = water entering the Membrane at node i (consistent FE flux)
+    waterFluxDisc:assemble_defect(R, currentSolution)
+    waterFlux.apical = VecProd(R, waterIndicator.apical)
+    waterFlux.basolateral = -VecProd(R, waterIndicator.basolateral)
+    R:enforce_consistent_type()
+    local denom, logv, absJ = waterWork[1], waterWork[2], waterWork[3]
+    for _, side in ipairs({"apical", "basolateral"}) do
+        local ind = waterIndicator[side]
+        local J = waterFluxDensity[side].forward
+        -- 1 / area at boundary nodes (1 elsewhere)
+        VecScaleAdd2(denom, 1.0, waterOnes, -1.0, ind)
+        VecScaleAdd2(denom, 1.0, denom, 1.0, waterArea[side])
+        VecLog(logv, denom)
+        VecScaleAssign(logv, -1.0, logv)
+        VecExp(denom, logv)
+        -- signed J_v = (+/-) R / area on this side's nodes
+        VecHadamardProd(J, R, denom)
+        VecHadamardProd(J, J, ind)
+        if side == "basolateral" then VecScaleAssign(J, -1.0, J) end
+        -- |J_v| = sqrt(J_v^2), then forward / backward parts
+        VecHadamardProd(absJ, J, J)
+        VecScaleAdd2(absJ, 1.0, absJ, 1.0e-300, waterOnes)
+        VecLog(logv, absJ)
+        VecScaleAssign(logv, 0.5, logv)
+        VecExp(absJ, logv)
+        local backward = waterFluxDensity[side].backward
+        VecScaleAdd2(backward, 0.5, absJ, -0.5, J)
+        VecScaleAdd2(J, 0.5, absJ, 0.5, J)
+        J:set_consistent_storage_type()
+        backward:set_consistent_storage_type()
+    end
+end
+UpdateWaterFlux(transportSolution)
+print(string.format(
+    "Solvent drag water flux [mm^3/s]: Apical %.6e (assembled interface %.6e), " ..
+    "Basolateral %.6e; areas [mm^2]: Apical %.6e, Basolateral %.6e",
+    waterFlux.apical, darcyInterfaceFlux, waterFlux.basolateral,
+    waterAreaTotal.apical, waterAreaTotal.basolateral))
+
+-- Drag transporter: Leak with the target input scaled to 0, so the flux is
+-- (1 - sigma) c_source times the density J_v (forward or backward part).
+function MakeDrag(sourceField, targetField, sigma, boundary, densityData)
+    local drag = Leak({sourceField, targetField})
+    drag:set_permeability(1.0 - sigma)
+    drag:set_scale_input(1, 0.0)
+    local disc = MembraneTransportFV1(boundary, drag)
+    disc:set_density_function(densityData)
+    return disc, drag
+end
+
 transportDisc = DomainDiscretization(approxSpace)
 AddFlowExporters(transportDisc)
 transportDisc:add(flowHold)
@@ -616,20 +798,45 @@ for _, soluteKey in ipairs(soluteOrder) do
 
     eqs.membraneDiscs = {}
     if p.apicalPermeability > 0.0 then
-        local apicalLeak = Leak({fields.lumen, fields.membrane})
-        apicalLeak:set_permeability(p.apicalPermeability)
+        local apicalLeak = MakeLeak(fields.lumen, fields.membrane,
+                                    p.apicalPermeability, p,
+                                    "lumen", "membrane")
         local apical = MembraneTransportFV1("Apical", apicalLeak)
         apical:set_density_function(1.0)
         transportDisc:add(apical)
         eqs.membraneDiscs[#eqs.membraneDiscs + 1] = apical
     end
     if p.basolateralPermeability > 0.0 then
-        local basolateralLeak = Leak({fields.membrane, fields.inter})
-        basolateralLeak:set_permeability(p.basolateralPermeability)
+        local basolateralLeak = MakeLeak(fields.membrane, fields.inter,
+                                         p.basolateralPermeability, p,
+                                         "membrane", "inter")
         local basolateral = MembraneTransportFV1("Basolateral", basolateralLeak)
         basolateral:set_density_function(1.0)
         transportDisc:add(basolateral)
         eqs.membraneDiscs[#eqs.membraneDiscs + 1] = basolateral
+    end
+
+    -- solvent drag (forward: with the water, backward: water flowing back)
+    eqs.dragDiscs = {apical = {}, basolateral = {}}
+    eqs.dragObjects = {}
+    for _, d in ipairs({
+        {"apical", "Apical", fields.lumen, fields.membrane, p.reflectionApical},
+        {"basolateral", "Basolateral", fields.membrane, fields.inter,
+         p.reflectionBasolateral}}) do
+        local side, boundary, inner, outer, sigma = d[1], d[2], d[3], d[4], d[5]
+        if sigma < 1.0 then
+            local fwd, fwdT = MakeDrag(inner, outer, sigma, boundary,
+                                       waterFluxData[side].forward)
+            local bwd, bwdT = MakeDrag(outer, inner, sigma, boundary,
+                                       waterFluxData[side].backward)
+            for _, disc in ipairs({fwd, bwd}) do
+                transportDisc:add(disc)
+                eqs.membraneDiscs[#eqs.membraneDiscs + 1] = disc
+            end
+            eqs.dragDiscs[side] = {fwd, bwd}
+            eqs.dragObjects[#eqs.dragObjects + 1] = fwdT
+            eqs.dragObjects[#eqs.dragObjects + 1] = bwdT
+        end
     end
 
     eqs.neumannDiscs = {
@@ -652,15 +859,15 @@ if pumpEnabled then
     pumpDiscs[1] = pump
 end
 
--- Inlet: inlet concentration.  OuterWall: fixed bath (Inter initial
--- value).  The Darcy pressure is Dirichlet on OuterWall, so the water leaving
+-- Inlet: inlet concentration.  OuterWall: fixed bath (outerWall).  The
+-- Darcy pressure is Dirichlet on OuterWall, so the water leaving
 -- there is the internal FV1 face flux into those boxes; a fixed bath
 -- concentration is the consistent (and natural) transport condition.
 concentrationBoundary = DirichletBoundary()
 for _, soluteKey in ipairs(soluteOrder) do
     local p = soluteParameters[soluteKey]
     concentrationBoundary:add(p.inlet, transportFields[soluteKey].lumen, "Inlet")
-    concentrationBoundary:add(p.interInitial, transportFields[soluteKey].inter,
+    concentrationBoundary:add(p.outerWall, transportFields[soluteKey].inter,
                               "OuterWall")
 end
 transportDisc:add(concentrationBoundary)
@@ -774,7 +981,23 @@ for _, soluteKey in ipairs(soluteOrder) do
         inlet = Indicator(fields.lumen, "Inlet"),
         outer = Indicator(fields.inter, "OuterWall"),
         lumen = Indicator(fields.lumen, transportFieldSubsets.lumen),
+        membrane = Indicator(fields.membrane, transportFieldSubsets.membrane),
+        inter = Indicator(fields.inter, transportFieldSubsets.inter),
     }
+end
+
+-- Solvent-drag-only discretizations, for the drag part of the transfers.
+dragBudgetDisc = {}
+for _, soluteKey in ipairs(soluteOrder) do
+    dragBudgetDisc[soluteKey] = {}
+    for _, side in ipairs({"apical", "basolateral"}) do
+        local discs = transportEquations[soluteKey].dragDiscs[side]
+        if #discs > 0 then
+            local d = DomainDiscretization(approxSpace)
+            for _, disc in ipairs(discs) do d:add(disc) end
+            dragBudgetDisc[soluteKey][side] = d
+        end
+    end
 end
 
 diagDefect = solution:clone()
@@ -788,9 +1011,27 @@ function SoluteBudget(currentSolution, oldSeries, stepDt)
     diagDefect:set(0.0)
     massDisc:assemble_defect(diagDefect, currentSolution)
     for _, soluteKey in ipairs(soluteOrder) do
-        budget[soluteKey] = {mass = VecProd(diagDefect, indicators[soluteKey].all)}
+        local ind = indicators[soluteKey]
+        budget[soluteKey] = {mass = VecProd(diagDefect, ind.all),
+                             massLumen = VecProd(diagDefect, ind.lumen),
+                             massMembrane = VecProd(diagDefect, ind.membrane),
+                             massInter = VecProd(diagDefect, ind.inter)}
     end
     if oldSeries == nil then return budget end
+    -- solvent-drag rates (net, source side of each membrane)
+    for _, soluteKey in ipairs(soluteOrder) do
+        local b, ind = budget[soluteKey], indicators[soluteKey]
+        b.dragApical, b.dragBasolateral = 0.0, 0.0
+        for side, d in pairs(dragBudgetDisc[soluteKey]) do
+            diagDefect:set(0.0)
+            d:assemble_defect(diagDefect, currentSolution)
+            if side == "apical" then
+                b.dragApical = VecProd(diagDefect, ind.lumen)
+            else
+                b.dragBasolateral = VecProd(diagDefect, ind.membrane)
+            end
+        end
+    end
     diagDefect:set(0.0)
     budgetTimeDisc:prepare_step(oldSeries, stepDt)
     budgetTimeDisc:assemble_defect(diagDefect, currentSolution)
@@ -973,10 +1214,87 @@ function TransportStepCallback(step, time, currentDt, current, oldSeries)
             step, time, soluteParameters[soluteKey].label, b.mass, rate,
             b.inflow, b.outlet, b.outer, errorPercent))
     end
+    -- reabsorption bookkeeping [pmol]: 1 mM mm^3 = 1 nmol = 1000 pmol
+    local w = 1000.0 * currentDt
+    cumulativeWater.apical = cumulativeWater.apical + waterFlux.apical * currentDt
+    cumulativeWater.basolateral = cumulativeWater.basolateral +
+        waterFlux.basolateral * currentDt
+    for _, soluteKey in ipairs(soluteOrder) do
+        local b, o, c = budget[soluteKey], previousBudget[soluteKey],
+            cumulative[soluteKey]
+        local apical = b.inflow - b.outlet -
+            (b.massLumen - o.massLumen) / currentDt
+        local basolateral = apical - (b.massMembrane - o.massMembrane) / currentDt
+        c.inflow = c.inflow + w * b.inflow
+        c.outlet = c.outlet + w * b.outlet
+        c.bath = c.bath + w * b.outer
+        c.apical = c.apical + w * apical
+        c.apicalDrag = c.apicalDrag + w * b.dragApical
+        c.basolateral = c.basolateral + w * basolateral
+        c.basolateralDrag = c.basolateralDrag + w * b.dragBasolateral
+        if ProcRank() == 0 then
+            reabsorptionFile:write(string.format(
+                "%.6g,%s,%.10e,%.10e,%.10e,%.10e,%.10e,%.10e,%.10e," ..
+                "%.10e,%.10e,%.10e,%.10e,%.10e,%.10e,%.10e\n",
+                time, soluteParameters[soluteKey].label,
+                1000.0 * b.inflow, 1000.0 * b.outlet, 1000.0 * apical,
+                1000.0 * b.dragApical, 1000.0 * basolateral,
+                1000.0 * b.dragBasolateral, 1000.0 * b.outer,
+                c.inflow, c.outlet, c.apical, c.apicalDrag, c.basolateral,
+                c.basolateralDrag, c.bath))
+            reabsorptionFile:flush()
+        end
+    end
+    if step % outputEverySteps == 0 or step == numSteps then
+        PrintReabsorption(time, budget)
+    end
     previousBudget = budget
     if not CheckBounds(current) then positivityFailed = true end
     if step % outputEverySteps == 0 or step == numSteps then
         WriteTransportOutput(current, step, time)
+    end
+end
+
+-- Cumulative reabsorption [pmol] and water [mm^3] since t = 0.
+cumulativeWater = {apical = 0.0, basolateral = 0.0}
+cumulative = {}
+for _, soluteKey in ipairs(soluteOrder) do
+    cumulative[soluteKey] = {inflow = 0.0, outlet = 0.0, bath = 0.0, apical = 0.0,
+                             apicalDrag = 0.0, basolateral = 0.0,
+                             basolateralDrag = 0.0}
+end
+reabsorptionFileName = outputName .. "_reabsorption.csv"
+if ProcRank() == 0 then
+    reabsorptionFile = io.open(reabsorptionFileName, "w")
+    if reabsorptionFile == nil then
+        print("Cannot create " .. reabsorptionFileName)
+        exit()
+    end
+    reabsorptionFile:write(
+        "time_s,solute,rate_in_pmol_s,rate_outlet_pmol_s,rate_apical_pmol_s," ..
+        "rate_apical_drag_pmol_s,rate_basolateral_pmol_s," ..
+        "rate_basolateral_drag_pmol_s,rate_bath_pmol_s," ..
+        "cum_in_pmol,cum_outlet_pmol,cum_apical_pmol,cum_apical_drag_pmol," ..
+        "cum_basolateral_pmol,cum_basolateral_drag_pmol,cum_bath_pmol\n")
+end
+
+-- apical = net lumen -> cell (leak + drag + transport), basolateral = net
+-- cell -> Inter; reabsorbed fraction = apical / inflow (cumulative).
+function PrintReabsorption(time, budget)
+    print(string.format(
+        "REABSORPTION t=%.6g s  water: Apical %.6e mm^3 (%.4f%% of inflow), " ..
+        "Basolateral %.6e mm^3", time, cumulativeWater.apical,
+        100.0 * waterFlux.apical / inletFlowRate, cumulativeWater.basolateral))
+    for _, soluteKey in ipairs(soluteOrder) do
+        local c, b = cumulative[soluteKey], budget[soluteKey]
+        print(string.format(
+            "REABSORPTION t=%.6g s %-4s [pmol] in=%.6e outlet=%.6e " ..
+            "apical=%.6e (drag %.6e) basolateral=%.6e (drag %.6e) bath=%.6e " ..
+            "reabsorbed=%.3f%% | stored lumen=%.6e cell=%.6e inter=%.6e",
+            time, soluteParameters[soluteKey].label, c.inflow, c.outlet,
+            c.apical, c.apicalDrag, c.basolateral, c.basolateralDrag, c.bath,
+            100.0 * c.apical / math.max(c.inflow, 1.0e-30),
+            1000.0 * b.massLumen, 1000.0 * b.massMembrane, 1000.0 * b.massInter))
     end
 end
 
@@ -1033,6 +1351,7 @@ for step = 1, numSteps do
         flowStepDisc:assemble_defect(flowDefect, transportSolution)
         flowLog = flowLog .. string.format(" (lin %d) -> %.3e",
                                            flowStepConv:step(), VecNorm(flowDefect))
+        UpdateWaterFlux(transportSolution)
         SetupTransportSolver()
     else
         flowLog = flowLog .. " (held)"
@@ -1081,6 +1400,8 @@ for step = 1, numSteps do
     timeDisc:finish_step_elem(solTimeSeries, gridLevel)
 end
 
+if ProcRank() == 0 then reabsorptionFile:close() end
+print("Reabsorption time series: " .. reabsorptionFileName)
 print(string.format("Transport time: %.3f s; total %.3f s",
                     GetClockS() - transportStart, GetClockS() - totalStartTime))
 print(string.format("Maximum per-step mass-balance error: %.3e%%",

@@ -41,6 +41,7 @@ Key post-change hashes (also in `SHA256SUMS_installed.txt`):
 - `ugcore/.../grid_generation/tetrahedralization.cpp` `51b0b40b4436155fe3b1c063bba7ba612e9dd0c963d079afecce3585721e2d62`
 - `neuro_collection/grid_generation/neurites_from_swc.cpp` `300129f941927a4ff1e031556468c8e15ecbb6af0e0f0979cdf61e8709a64ae4` (2026-11-24: linear outward caps, checker lineage/mode 4, multi-nephron hex shell; previous `c61a0c30…`)
 - `neuro_collection/pressure_trace_constraint.cpp` `5e0d776fb4e939036ebebb21f2094f3e82ea99af9f686354a040526f04b8e63c`
+- `neuro_collection/vertex_grid_function_data.h` `e9cfd106b98970d1e44a4940e5c842e67def33b3f24e03940fbd19c31369000b` (2026-11-27, new: exact vertex-position lookup of a nodal grid-function value, registered as `VertexGridFunctionNumberData` in `neuro_collection_plugin.cpp` `c0bb4be823033ef5a7bb6e011b6a00d714447c9d37b9d6f6bc8f93e38bd72725`; used for the solvent-drag water flux)
 
 ## Build configuration used (this workstation)
 
